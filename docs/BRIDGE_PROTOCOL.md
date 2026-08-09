@@ -1,12 +1,27 @@
-# Existing Playwright Bridge Protocol
+# ChatGPT Browser Bridge Protocol
 
-GPTTRADDER intentionally does not store browser cookies, ChatGPT storage state, passwords, or session data.
+GPTTRADDER ships a ready adapter at `bridge/server.mjs` for the existing private `chatgpt-zcode-browser-mcp` project.
 
-The user's existing bridge should expose a local endpoint:
+The Python process talks only to:
 
 `POST http://127.0.0.1:8787/decision`
 
-Request body:
+The Node adapter talks to the existing MCP over stdio and calls:
+
+- `chatgpt_list_sessions`
+- `chatgpt_bind_session` when necessary
+- `chatgpt_status`
+- `chatgpt_send`
+
+For every market cycle it uses:
+
+```text
+client_message_id = gpttradder:<cycle_id>
+```
+
+This makes HTTP retry behavior converge on the browser MCP's durable at-most-once send semantics.
+
+## Python request
 
 ```json
 {
@@ -21,27 +36,27 @@ Request body:
 }
 ```
 
-Response body must be a bare JSON object conforming to `gpttradder.models.Decision`.
+## Adapter response
 
-The bridge owns browser/session details. GPTTRADDER owns validation and execution.
+A bare JSON object conforming to `gpttradder.models.Decision`.
 
-## Required bridge behavior
+The adapter rejects the response if:
 
-1. Reuse the configured authenticated browser session.
-2. Send the packet to the designated conversation.
-3. Wait until the response is complete.
-4. Extract only the structured Decision JSON.
-5. Never ask DeepSeek to choose or alter trading values.
-6. Return a non-2xx response if the browser session is unhealthy, the response is incomplete, or JSON cannot be validated.
-7. Never return the previous response as if it were new unless the Decision explicitly allows reuse.
+- MCP does not confirm dispatch;
+- assistant response is empty;
+- no valid JSON object can be extracted;
+- returned `cycle_id` differs from the request.
 
-## Secrets
+Python performs full Pydantic schema validation after that.
 
-Do not commit any of these:
-- cookies
-- storage state
-- session tokens
-- broker credentials
-- API keys
+## Local secrets
 
-Keep them outside the repository and inject them at runtime.
+Do not commit:
+
+- cookies;
+- browser storage state;
+- broker credentials;
+- API keys;
+- ChatGPT session tokens.
+
+The existing MCP project continues owning its persistent browser profile.

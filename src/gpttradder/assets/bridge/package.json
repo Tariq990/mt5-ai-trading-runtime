@@ -1,0 +1,10 @@
+{
+  "name": "gpttradder-chatgpt-bridge",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --test *.test.mjs"
+  }
+}

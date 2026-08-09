@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpttradder"
-version = "0.1.0"
-description = "Demo-only BTC/XAU trading automation orchestrator with external ChatGPT decision bridge."
+version = "0.4.0"
+description = "Demo-only multi-asset trading automation orchestrator with external ChatGPT decision bridge."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,6 +14,8 @@ dependencies = [
   "httpx>=0.27,<1",
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
+  # Windows lacks a system IANA timezone database; ZoneInfo needs this.
+  "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
@@ -34,3 +36,6 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.setuptools.package-data]
+"gpttradder.assets" = ["bridge/*.mjs", "bridge/package.json", "prompts/*.md"]

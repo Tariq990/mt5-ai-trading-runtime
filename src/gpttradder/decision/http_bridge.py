@@ -22,11 +22,15 @@ class HTTPDecisionBridge(DecisionProvider):
 
     async def decide(self, packet: MarketPacket) -> Decision:
         last_error: Exception | None = None
+        last_body = ""
         for delay in self.settings.decision_retry_delays:
             if delay:
                 await asyncio.sleep(delay)
             try:
-                async with httpx.AsyncClient(timeout=self.settings.decision_timeout_seconds) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.settings.decision_timeout_seconds,
+                    transport=getattr(self.settings, "_bridge_transport", None),
+                ) as client:
                     response = await client.post(
                         self.settings.decision_bridge_url,
                         json={
@@ -42,6 +46,14 @@ class HTTPDecisionBridge(DecisionProvider):
                     )
                     response.raise_for_status()
                     return Decision.model_validate(response.json())
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text[:400]
+                last_error = RuntimeError(f"HTTP {exc.response.status_code}: {body or exc}")
+                # Deterministic failure (identical server error twice in a row)
+                # will never succeed on further retries; fail fast.
+                if body and body == last_body:
+                    raise last_error
+                last_body = body
             except (httpx.HTTPError, ValueError) as exc:
                 last_error = exc
         raise RuntimeError(f"Decision bridge failed after retries: {last_error}")

@@ -13,3 +13,8 @@ playwright/.auth/
 cookies*.json
 storage_state*.json
 .DS_Store
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

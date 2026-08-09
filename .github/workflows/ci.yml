@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - run: python -m compileall -q src tests
+      - run: gpttradder smoke --mock-decision
+      - run: gpttradder report
+      - name: Build wheel and verify bundled bridge assets
+        shell: bash
+        run: |
+          rm -rf dist build
+          python -m pip wheel . --no-deps --no-build-isolation -w dist
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          wheel = next(Path('dist').glob('gpttradder-*.whl'))
+          required = {
+              'gpttradder/assets/bridge/server.mjs',
+              'gpttradder/assets/bridge/json.mjs',
+              'gpttradder/assets/bridge/package.json',
+              'gpttradder/assets/prompts/chatgpt_decision_prompt.md',
+          }
+          with zipfile.ZipFile(wheel) as zf:
+              missing = required.difference(zf.namelist())
+          if missing:
+              raise SystemExit(f'Missing wheel assets: {sorted(missing)}')
+          print(f'wheel assets OK: {wheel}')
+          PY
+
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - working-directory: bridge
+        run: npm run check

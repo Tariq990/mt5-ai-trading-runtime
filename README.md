@@ -1,115 +1,189 @@
 # GPTTRADDER
 
-Zero-touch, demo-only trading automation scaffold for BTCUSD and XAUUSD.
+Zero-touch **DEMO-only** BTC/XAU trading automation with ChatGPT as the sole trading decision engine.
 
-> **Safety:** This repository is intentionally **DEMO ONLY**. The runtime and broker adapter include guards intended to prevent use with a real-money account.
+## Responsibility boundaries
 
-## Architecture
+- **ChatGPT:** trading judgment — LONG/SHORT/WAIT, entry type, size, risk, SL/TP and position management.
+- **DeepSeek:** optional orchestration only; it is not allowed to invent or modify trading values.
+- **Deterministic code:** broker data, validation, hard risk limits, idempotency, execution, retries, event detection, logging, watchdog, reports and dashboard.
+- **MT5:** execution source of truth. Real-account trading is hard-blocked.
 
-- **ChatGPT** — sole trading decision engine.
-- **DeepSeek** — orchestration/transport helper only; it must never create or alter a trade decision.
-- **Deterministic Python code** — market/account collection, risk limits, validation, idempotency, execution, retries, and logging.
-- **Broker** — execution source of truth.
+## Included in 0.3.0
 
-The target loop is:
+### Trading/runtime
+- BTC + XAU monitored together.
+- 1m, 5m, 15m, 30m, 1h, 4h and 1d data.
+- Full 5-minute cycles plus price/spread/breakout event interrupts.
+- Market, Limit and Stop entries.
+- HOLD, MOVE_SL, MOVE_TP, BREAK_EVEN, PARTIAL_CLOSE and FULL_CLOSE.
+- Pending-order cancellation.
+- MT5 hedging/netting detection.
+- Fresh quote revalidation before new entries.
+- Stale-market-data rejection per symbol.
 
-```text
-BTCUSD + XAUUSD broker data
-        ↓
-Collector + Safety Gate
-        ↓
-Market Packet
-        ↓
-Existing Playwright / ChatGPT bridge
-        ↓
-Structured Decision JSON
-        ↓
-Validator + Risk Engine
-        ↓
-DEMO execution
-        ↓
-Verify + Log
-```
+### Hard safety
+- Demo account required before broker writes.
+- 3% daily loss entry lock persisted across restarts.
+- 10% trailing drawdown entry lock from persisted peak equity.
+- Open stop-risk + new stop-risk bounded by remaining risk headroom.
+- `decision_id` claimed in SQLite **before** broker write.
+- Cross-process cycle lock.
+- Stable ChatGPT bridge message IDs for retry deduplication.
+- Protective close/tighten/cancel actions remain available when new-risk entry is locked.
 
-## Current MVP
+### Operations
+- Local dashboard at `http://127.0.0.1:8765/dashboard`.
+- Telegram execution/error alerts with persistent anti-spam dedupe.
+- Daily report at a configurable local time (default 23:55 Asia/Amman).
+- Runtime + bridge watchdog with health checks, heartbeat detection and exponential restart backoff.
+- Windows Task Scheduler auto-start at user logon.
+- Rotating local logs.
+- Read-only preflight, safe browser bridge verification, and Demo-only MT5 write/cancel verification.
 
-- BTCUSD + XAUUSD support.
-- Timeframes from 1 minute through 1 day.
-- Five-minute polling runtime.
-- Event-trigger hooks for future expansion.
-- Structured market packets and decision contracts.
-- 3% daily-loss hard stop.
-- 10% trailing drawdown hard stop from peak equity.
-- Duplicate-decision protection.
-- SQLite audit log.
-- Simulated broker for safe local testing.
-- MT5 demo adapter scaffold with explicit demo-account guard.
-- HTTP decision bridge contract for an existing Playwright transport.
-- Mock decision provider for local end-to-end testing.
-- Tests for safety, idempotency, and orchestration.
-
-## Quick start
-
-Requires Python 3.11+.
-
-```bash
-python -m venv .venv
-```
+## Install
 
 Windows PowerShell:
 
 ```powershell
+py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+pip install -e ".[dev,mt5]"
 Copy-Item .env.example .env
-pytest
-python -m gpttradder.cli cycle
 ```
 
-Run the local API:
+The GPTTRADDER bridge reuses `@modelcontextprotocol/sdk` from your existing `chatgpt-zcode-browser-mcp` installation, so there is no second Node dependency install step.
 
-```bash
-uvicorn gpttradder.api:app --reload
+Edit `.env` and set at minimum:
+
+```env
+GPTTRADDER_BROKER=mt5
+GPTTRADDER_SYMBOLS=BTCUSD,XAUUSD
+GPTTRADDER_BROWSER_MCP_DIR=C:\path\to\chatgpt-zcode-browser-mcp
+GPTTRADDER_CHATGPT_CONVERSATION_URL=https://chatgpt.com/c/YOUR-CONVERSATION-ID
 ```
 
-## Modes
+Your broker may use names such as `BTCUSDm` or `XAUUSD.a`; use exactly what MT5 shows.
 
-### Simulated broker
+## Optional Telegram
 
-Default development mode. It produces deterministic demo quotes and accepts only simulated orders.
+Add your own credentials locally — never commit them:
 
-### MT5 Demo
+```env
+GPTTRADDER_TELEGRAM_ENABLED=true
+GPTTRADDER_TELEGRAM_BOT_TOKEN=YOUR_TOKEN
+GPTTRADDER_TELEGRAM_CHAT_ID=YOUR_CHAT_ID
+```
 
-Set the broker to `mt5_demo` only after MetaTrader 5 is installed, logged in to a **demo** account, and the symbol mapping has been verified.
+The preflight checks Telegram authentication when enabled.
 
-The adapter rejects an account unless its environment explicitly identifies it as demo. Do not remove this guard.
+## Readiness gates
 
-## Environment
+Run these before continuous Demo operation:
 
-Copy `.env.example` to `.env` and configure only local non-secret settings there. Never commit:
+```powershell
+pytest -q
+npm --prefix bridge run check
+gpttradder verify-bridge
+gpttradder preflight
+gpttradder verify-mt5-write
+```
 
-- broker passwords
-- API keys
-- session cookies
-- Playwright storage state
-- account tokens
+`verify-bridge` uses the real Playwright → ChatGPT path but **forces simulated broker execution**.
 
-## Development priorities
+`verify-mt5-write` is Demo-only. It places a minimum-volume pending order far from market and immediately cancels it to verify `order_check → order_send → cancel` on the actual broker.
 
-1. Keep the full cycle reliable before adding more market data.
-2. Never let DeepSeek infer or repair a trade decision.
-3. Every decision must have a unique ID and expiration.
-4. Refresh bid/ask immediately before market execution.
-5. Broker-side SL/TP must remain active if automation fails.
-6. A transport failure must never become a fallback trade.
+## Zero-touch mode
 
-## Documentation
+The watchdog is the recommended entrypoint:
 
-- `docs/ARCHITECTURE.md`
-- `docs/BRIDGE_PROTOCOL.md`
-- `prompts/chatgpt_decision_prompt.md`
-- `prompts/deepseek_orchestrator_prompt.md`
+```powershell
+gpttradder watchdog
+```
 
-## Status
+When configured, it:
 
-MVP scaffold. Keep it on DEMO until the transport, broker adapter, and execution verification have been tested extensively.
+1. checks/starts the Node ChatGPT bridge;
+2. waits for bridge health;
+3. starts GPTTRADDER runtime;
+4. monitors runtime heartbeat and bridge HTTP health;
+5. restarts failed/wedged components with bounded exponential backoff.
+
+Install it at Windows logon:
+
+```powershell
+gpttradder autostart-install
+```
+
+Remove the scheduled task:
+
+```powershell
+gpttradder autostart-remove
+```
+
+The task name is `GPTTRADDER-Watchdog`.
+
+## Dashboard
+
+With runtime running:
+
+```text
+http://127.0.0.1:8765/dashboard
+```
+
+The dashboard is deliberately restricted to loopback interfaces and uses no CDN/external frontend assets. It displays account/risk state, market quotes, open positions, pending orders, watchdog/bridge state and recent decisions.
+
+Useful API endpoints:
+
+- `GET /health`
+- `GET /dashboard`
+- `GET /api/dashboard`
+- `GET /api/report/today`
+- `POST /cycle`
+- `POST /event/{reason}`
+
+## Reports
+
+Print today's report:
+
+```powershell
+gpttradder report
+```
+
+Force-send it to Telegram (when enabled):
+
+```powershell
+gpttradder report-send
+```
+
+Daily reports are persisted in SQLite and are not sent twice after a successful delivery. Failed Telegram delivery remains retryable.
+
+## Logs
+
+- `logs/gpttradder.log`
+- `logs/watchdog.log`
+- `logs/runtime-supervised.log`
+- `logs/bridge-supervised.log`
+- `logs/watchdog-autostart.log`
+
+## Commands
+
+```text
+gpttradder smoke --mock-decision
+gpttradder verify-bridge
+gpttradder preflight
+gpttradder verify-mt5-write
+gpttradder once
+gpttradder run
+gpttradder watchdog
+gpttradder report
+gpttradder report-send
+gpttradder autostart-install
+gpttradder autostart-remove
+```
+
+## What local CI cannot prove
+
+Tests can fully validate the code, simulator, fake-MT5 request shapes, dashboard, notification logic, watchdog policy and packaging. The actual Windows machine still owns three external dependencies: its authenticated Playwright profile, its MT5 terminal/broker symbols, and its Demo broker write path. The three readiness commands above are the gates for those dependencies.
+
+Experimental Demo trading only. Technical correctness does not guarantee profitable trading decisions.
