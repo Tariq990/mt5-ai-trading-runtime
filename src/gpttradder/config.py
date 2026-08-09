@@ -41,7 +41,10 @@ class Settings(BaseSettings):
     # positions, deals) are stamped in broker server time — typically UTC+2
     # (EET) or UTC+3 (EEST). All broker timestamps are normalized to UTC by
     # this offset, and freshness gates fail closed on residual future skew.
-    broker_server_utc_offset_hours: float = Field(default=2.0, ge=-14, le=14)
+    # None (default) = AUTO-DETECTED at connect from fresh tick probes
+    # (DST-safe, per-cycle refresh). An explicit value is an override validated
+    # against the live measurement; a contradiction >= 0.5h fails closed.
+    broker_server_utc_offset_hours: float | None = Field(default=None, ge=-14, le=14)
     # A quote stamped more than this far in the future (after normalization) is
     # treated as invalid: never fresh, never executable.
     quote_future_skew_tolerance_seconds: float = Field(default=5.0, ge=0, le=60)

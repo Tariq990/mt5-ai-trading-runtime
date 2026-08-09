@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -243,6 +243,16 @@ class OrderInstruction(BaseModel):
     acceptable_price_range: tuple[float, float] | None = None
     size: float = Field(gt=0)
 
+    @field_validator("acceptable_price_range", mode="before")
+    @classmethod
+    def coerce_price_range(cls, value):
+        """Accept ChatGPT's dict shorthand ({min, max}) as a (lo, hi) tuple."""
+        if value is None or isinstance(value, (tuple, list)):
+            return value
+        if isinstance(value, dict) and "min" in value and "max" in value:
+            return (float(value["min"]), float(value["max"]))
+        raise ValueError(f"invalid acceptable_price_range: {value!r}")
+
     @model_validator(mode="after")
     def validate_order(self):
         if self.acceptable_price_range:
@@ -291,6 +301,34 @@ class Decision(BaseModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     reason: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("take_profit", mode="before")
+    @classmethod
+    def coerce_take_profit(cls, value):
+        """Accept ChatGPT's shorthand TP forms and normalize them.
+
+        A bare price (e.g. ``take_profit: 65420``) means one full-size target.
+        A list of prices is ambiguous (each would claim 100% of the position)
+        and fails closed with a clear error instead of being guessed at.
+        """
+        if value is None or value == []:
+            return []
+        if isinstance(value, (int, float)):
+            return [{"price": float(value), "close_percent": 100.0}]
+        if isinstance(value, (list, tuple)):
+            targets = []
+            for item in value:
+                if isinstance(item, (int, float)):
+                    targets.append({"price": float(item), "close_percent": 100.0})
+                elif isinstance(item, dict) and "price" in item:
+                    targets.append({
+                        "price": item["price"],
+                        "close_percent": item.get("close_percent", 100.0),
+                    })
+                else:
+                    raise ValueError(f"invalid take_profit item: {item!r}")
+            return targets
+        raise ValueError(f"invalid take_profit: {value!r}")
 
     @model_validator(mode="after")
     def validate_decision_fields(self):

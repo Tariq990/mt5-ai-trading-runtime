@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJson, normalizeMarkdownEscapes } from './json.mjs';
+import { extractJson } from './json.mjs';
 
 test('parses bare JSON', () => {
   assert.deepEqual(extractJson('{"decision":"WAIT"}'), { decision: 'WAIT' });
@@ -15,30 +15,25 @@ test('extracts JSON around incidental prose and braces in strings', () => {
   assert.equal(value.reason, 'x { y }');
 });
 
-test('normalizes markdown-escaped underscores inside JSON', () => {
-  const value = extractJson('{"decision":"WAIT","cycle\\_id":"abc-123","reason":"fair\\_value check \\*done\\*"}');
-  assert.equal(value.cycle_id, 'abc-123');
-  assert.equal(value.reason, 'fair_value check *done*');
+test('parses markdown-escaped JSON keys (ChatGPT web rendering)', () => {
+  const value = extractJson('{"cycle\\_id":"c-1","decision":"WAIT","valid\\_until":"x"}');
+  assert.deepEqual(value, { cycle_id: 'c-1', decision: 'WAIT', valid_until: 'x' });
 });
 
-test('parses markdown-escaped fenced JSON as written by web ChatGPT', () => {
-  const raw = [
-    'Here is your decision:',
-    '```json',
-    '{"decision":"WAIT","cycle\\_id":"c1","reason":"BTC \\_ above candles; WAIT per contract"}',
-    '```',
-    'Let me know if you need anything else.',
-  ].join('\n');
-  const value = extractJson(raw);
-  assert.equal(value.decision, 'WAIT');
-  assert.equal(value.cycle_id, 'c1');
+test('parses markdown-escaped JSON inside fenced block', () => {
+  const value = extractJson('```json\n{"decision\\_":"WAIT"}\n```');
+  assert.deepEqual(value, { decision_: 'WAIT' });
 });
 
-test('preserves valid JSON escapes while normalizing markdown escaping', () => {
-  assert.equal(normalizeMarkdownEscapes('{"a":"x\\ny","b":"line\\_x","c":"\\"q\\""}'), '{"a":"x\\ny","b":"line_x","c":"\\"q\\""}');
-  const value = extractJson('{"a":"x\\ny","b":"line\\_x"}');
-  assert.equal(value.a, 'x\ny');
-  assert.equal(value.b, 'line_x');
+test('unescapes escaped punctuation in arrays and object braces', () => {
+  const value = extractJson(
+    '{"order":{"entry":65170,"acceptable\\_price\\_range":\\[65170,65190\\]},"decision":"LONG","take\\_profit":\\[{"price":65245,"close\\_percent":30}\\]}',
+  );
+  assert.deepEqual(value, {
+    order: { entry: 65170, acceptable_price_range: [65170, 65190] },
+    decision: 'LONG',
+    take_profit: [{ price: 65245, close_percent: 30 }],
+  });
 });
 
 test('rejects missing JSON', () => {

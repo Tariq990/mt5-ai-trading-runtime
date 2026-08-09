@@ -96,7 +96,11 @@ For `LONG`/`SHORT`, additionally include:
 - `order.acceptable_price_range` where useful
 - `order.size`
 - `stop_loss`
-- `take_profit` targets
+- `take_profit` targets — MUST be a JSON array of objects, one per target:
+  `[{"price": 65420, "close_percent": 50}]`. `close_percent` is the share of
+  the position closed at that target (>0, <=100); the total across targets must
+  be <=100. A single full-size target uses `close_percent: 100`. Bare numbers
+  are NOT schema-valid; an empty list (`[]`) means no take-profit.
 - `risk_percent` (>0 and <=3)
 - `management_mode`
 - `reuse_policy`

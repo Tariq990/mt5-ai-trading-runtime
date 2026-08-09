@@ -25,6 +25,15 @@ async def run_preflight(settings: Settings, broker: Broker, db: Database, check_
         await broker.connect()
         await broker.assert_demo()
         account = await broker.get_account_state()
+        clock_detail = "auto-detected"
+        clock_ok = True
+        offset = getattr(broker, "server_utc_offset_hours", None)
+        attribution = getattr(broker, "offset_attribution", None)
+        if offset is not None and attribution is not None:
+            clock_detail = f"{offset:g}h ({attribution})"
+        elif offset is not None:
+            clock_detail = f"{offset:g}h"
+        checks.append(Check("broker_clock", clock_ok, clock_detail))
         checks.append(Check(
             "demo_account",
             account.is_demo,

@@ -59,8 +59,9 @@ Ambiguous matches fail closed (`AMBIGUOUS`) and require an explicit `symbol_map`
 - `src/gpttradder/reports.py` — durable daily report
 - `src/gpttradder/watchdog.py` — zero-touch Windows startup/restart
 - `src/gpttradder/verification.py` — `verify_mt5_demo_write` (pending order place + cancel on demo)
-- `src/gpttradder/preflight.py` — startup environment/broker/bridge checks (`symbols_resolved`, `market:c`, `contract:c` per canonical symbol)
+- `src/gpttradder/preflight.py` — startup environment/broker/bridge checks (`broker_clock`, `symbols_resolved`, `market:c`, `contract:c` per canonical symbol)
 - `src/gpttradder/cli.py` — `gpttradder` console commands
+- `src/gpttradder/decision/http_bridge.py` — freezes the per-cycle payload ONCE (byte-identical retries, one SHA-256, one `client_message_id`), persists every send attempt via `on_send`
 - `tests/` — pytest suite (see Testing requirements)
 - `REPOSITORY.md` — full specification and phase history
 
@@ -139,11 +140,12 @@ Every one of these is enforced by code (mostly `safety.py`), never by ChatGPT:
 - Daily loss/DD locks block NEW risk only — protective management (HOLD/MOVE_SL/MOVE_TP/BREAK_EVEN/PARTIAL_CLOSE/FULL_CLOSE/CLOSE_POSITION/CANCEL_ORDER) stays available
 - Broker-side SL remains the last line of protection
 - Decision duplication + overlapping event triggers prevented (DB claims, cycle lock, debounce)
+- The ChatGPT message is FROZEN once per cycle: byte-identical retries, one SHA-256, one `client_message_id`; quote ages come from the fixed packet reference instant, never `Date.now()`; every send attempt is persisted in `bridge_sends`
 - Dashboard binds loopback only
 
 ## Environment variables
 
-All prefixed `GPTTRADDER_` (see `.env.example`). Required for real use: `GPTTRADDER_ENV=demo`, `GPTTRADDER_BROKER=mt5` (default `simulated`), `GPTTRADDER_DB_PATH`. Optional: `GPTTRADDER_SYMBOLS` (JSON array of canonical symbols), `GPTTRADDER_SYMBOL_MAP` (JSON override), `GPTTRADDER_BROKER_SERVER_UTC_OFFSET_HOURS` (MT5 server clock offset, default 2.0; summer servers usually 3.0), `GPTTRADDER_QUOTE_FUTURE_SKEW_TOLERANCE_SECONDS`, `GPTTRADDER_MARKET_SESSION_WEEKEND_START_HOUR_UTC` / `_END_HOUR_UTC`, Telegram (`GPTTRADDER_TELEGRAM_ENABLED/BOT_TOKEN/CHAT_ID`), timing/limits. Secret values (token, chat id) must never be committed or logged.
+All prefixed `GPTTRADDER_` (see `.env.example`). Required for real use: `GPTTRADDER_ENV=demo`, `GPTTRADDER_BROKER=mt5` (default `simulated`), `GPTTRADDER_DB_PATH`. Optional: `GPTTRADDER_SYMBOLS` (JSON array of canonical symbols), `GPTTRADDER_SYMBOL_MAP` (JSON override), `GPTTRADDER_BROKER_SERVER_UTC_OFFSET_HOURS` (explicit MT5 server clock offset override; unset = AUTO-detected at connect from fresh tick probes, re-measured every cycle for DST; any override contradicting the measured clock by >= 0.5h fails closed), `GPTTRADDER_QUOTE_FUTURE_SKEW_TOLERANCE_SECONDS`, `GPTTRADDER_MARKET_SESSION_WEEKEND_START_HOUR_UTC` / `_END_HOUR_UTC`, Telegram (`GPTTRADDER_TELEGRAM_ENABLED/BOT_TOKEN/CHAT_ID`), timing/limits. Secret values (token, chat id) must never be committed or logged.
 
 Timeout invariant (pydantic validator in `config.py`): `GPTTRADDER_CHATGPT_TIMEOUT_SECONDS` must be strictly below `GPTTRADDER_DECISION_TIMEOUT_SECONDS` (defaults 80 < 90).
 
@@ -171,6 +173,6 @@ Windows deployment runs the Python runtime as a service-like process managed by 
 
 ## Current release status
 
-v0.4.0 hardening complete: broker server-clock -> UTC normalization (`timeutil.py`), decomposed fail-closed `SymbolStatus` (broker_trade_mode / quote_fresh / market_session_open / executable_now), new `SYMBOL_NOT_EXECUTABLE` entry gate, weekend session calendar, preflight clock checks — final test count: 121 Python + 15 node tests (see REPOSITORY.md).
+v0.4.0 hardening complete: broker server-clock -> UTC normalization (`timeutil.py`), auto-measured broker offset (Raw Trading demo measured UTC+3 EEST; `broker_clock: 3h (auto-measured 3h)` in preflight; DST-safe per-cycle re-measure, fail-closed override validation), decomposed fail-closed `SymbolStatus`, new `SYMBOL_NOT_EXECUTABLE` entry gate, weekend session calendar, deterministic frozen ChatGPT bridge messages (one SHA-256, one `client_message_id`, `bridge_sends` audit trail; root cause of the 502 dedup storms was `Date.now()` in the digest — fixed), lenient ChatGPT shorthand parsing (scalar TP, {min,max} price range), extended markdown-unescape — final test count: 142 Python + 18 node tests; live MT5 preflight all PASS, demo write/cancel PASS, real ChatGPT cycle placed a live demo order (see REPOSITORY.md Fix 4).
 
 Next release in flight: Git init + publish to GitHub `Tariq990/GPTTRADDER`, final verification and readiness report.

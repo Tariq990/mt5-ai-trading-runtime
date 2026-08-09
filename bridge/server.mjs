@@ -2,9 +2,20 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMcpSdk } from './sdk-loader.mjs';
 import { extractJson } from './json.mjs';
+import { buildDecisionMessage } from './digest.mjs';
+
+function sha256Hex(text) {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+// Per-cycle fingerprint of the rendered decision message. Sending the same
+// client_message_id with different text is rejected by the ChatGPT bridge's
+// dedup; this guard makes any such regression fail loudly BEFORE dispatch.
+const renderedShas = new Map();
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
@@ -115,12 +126,23 @@ const server = http.createServer(async (req, res) => {
     const cycleId = packet?.cycle_id;
     if (!packet || !cycleId) throw new Error('market_packet.cycle_id is required');
 
-    const message = `${decisionContract}\n\n--- LIVE MARKET PACKET ---\n${JSON.stringify(packet)}\n\nReturn exactly one Decision JSON object and nothing else.`;
+    const message = buildDecisionMessage(decisionContract, packet);
+    const messageSha = sha256Hex(message);
+    const previousSha = renderedShas.get(cycleId);
+    if (previousSha && previousSha !== messageSha) {
+      throw new Error(
+        `message changed between attempts for cycle ${cycleId} (sha ${previousSha} -> ${messageSha}); ` +
+          'retries must reuse the byte-identical frozen message. Aborting this send.',
+      );
+    }
+    renderedShas.set(cycleId, messageSha);
+    if (renderedShas.size > 10000) renderedShas.clear();
     const send = toolPayload(await client.callTool({
       name: 'chatgpt_send',
       arguments: {
         session_key: sessionKey,
         message,
+        message_sha256: messageSha,
         client_message_id: `gpttradder:${cycleId}`,
         timeout_seconds: timeoutSeconds,
       },

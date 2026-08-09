@@ -22,7 +22,11 @@ from ..models import (
 )
 from ..risk import normalize_volume
 from ..symbols import SymbolResolution, resolve_canonical_symbols
-from ..timeutil import normalize_broker_epoch
+from ..timeutil import (
+    OFFSET_PROBE_SYMBOLS,
+    measure_broker_utc_offset_hours,
+    normalize_broker_epoch,
+)
 
 
 class MT5DemoBroker(Broker):
@@ -46,17 +50,67 @@ class MT5DemoBroker(Broker):
         4: "FULL",
     }
 
-    def __init__(self, server_utc_offset_hours: float = 2.0):
+    def __init__(self, server_utc_offset_hours: float | None = None):
         self.mt5 = None
         self._resolution: dict[str, SymbolResolution] = {}
-        self.server_utc_offset_hours = server_utc_offset_hours
+        # None = auto-detect from live tick probes (see timeutil); a configured
+        # value is an explicit override that is validated against the measured
+        # clock and rejected (fail closed) when it contradicts it by >= 0.5h.
+        self.configured_offset_hours = server_utc_offset_hours
+        self.server_utc_offset_hours: float | None = None
+        self.offset_attribution = "unset"
+
+    def _tick_probe(self, symbol: str) -> float | None:
+        if self.mt5 is None:
+            return None
+        tick = self.mt5.symbol_info_tick(symbol)
+        if tick is None or not getattr(tick, "time_msc", None):
+            return None
+        return float(tick.time_msc) / 1000.0
+
+    def measure_utc_offset(self) -> float | None:
+        """Auto-detect broker server clock offset from fresh ticks (DST-safe)."""
+        candidates = list(OFFSET_PROBE_SYMBOLS)
+        candidates.extend(sorted(self._resolution))
+        return measure_broker_utc_offset_hours(self._tick_probe, candidates)
+
+    def _apply_offset_policy(self, measured: float | None, require: bool) -> None:
+        configured = self.configured_offset_hours
+        if configured is None:
+            if measured is None:
+                if require:
+                    raise RuntimeError(
+                        "Unable to measure the broker server UTC offset (no fresh tick probes; "
+                        "market fully closed?) and GPTTRADDER_BROKER_SERVER_UTC_OFFSET_HOURS is not "
+                        "set. Failing closed: freshness normalization needs a verified clock. "
+                        "Set the override explicitly or retry when the market is open."
+                    )
+                return
+            self.server_utc_offset_hours = measured
+            self.offset_attribution = f"auto-measured {measured:g}h"
+            return
+        if measured is not None and abs(configured - measured) >= 0.5:
+            raise RuntimeError(
+                f"Configured broker server UTC offset {configured:g}h contradicts the measured "
+                f"{measured:g}h (see GPTTRADDER_BROKER_SERVER_UTC_OFFSET_HOURS). Failing closed: "
+                "refusing to normalize timestamps with an implausible offset."
+            )
+        self.server_utc_offset_hours = configured
+        self.offset_attribution = (
+            f"configured override {configured:g}h"
+            + ("" if measured is None else f" (consistent with measured {measured:g}h)")
+        )
 
     def _utc(self, epoch_seconds: float) -> datetime:
-        """MT5 server clock -> canonical UTC (server time is usually EET/EEST,
+        """MT5 server clock -> canonical UTC (server clock is usually EET/EEST,
         not UTC; see timeutil.normalize_broker_epoch)."""
+        if self.server_utc_offset_hours is None:
+            raise RuntimeError("MT5 server UTC offset is unverified; refusing to normalize timestamps")
         return normalize_broker_epoch(epoch_seconds, self.server_utc_offset_hours)
 
     def _server_epoch(self, utc_dt: datetime) -> float:
+        if self.server_utc_offset_hours is None:
+            raise RuntimeError("MT5 server UTC offset is unverified; refusing to convert to server time")
         return (utc_dt.astimezone(timezone.utc).timestamp() + self.server_utc_offset_hours * 3600.0)
 
     async def connect(self) -> None:
@@ -68,6 +122,7 @@ class MT5DemoBroker(Broker):
         if not mt5.initialize():
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
         await self.assert_demo()
+        self._apply_offset_policy(self.measure_utc_offset(), require=True)
 
     async def assert_demo(self) -> None:
         if self.mt5 is None:
@@ -88,6 +143,10 @@ class MT5DemoBroker(Broker):
         symbols = self.mt5.symbols_get() or []
         names = {str(s.name).strip().upper() for s in symbols if getattr(s, "name", None)}
         self._resolution = resolve_canonical_symbols(names, canonical=canonical, symbol_map=symbol_map)
+        # Re-measure the broker clock on every cycle: DST shifts (EET<->EEST)
+        # are picked up automatically, and any contradiction with an explicit
+        # override fails closed immediately.
+        self._apply_offset_policy(self.measure_utc_offset(), require=self.configured_offset_hours is None)
         return self._resolution
 
     async def get_contract(self, canonical: str) -> SymbolContractSpec | None:

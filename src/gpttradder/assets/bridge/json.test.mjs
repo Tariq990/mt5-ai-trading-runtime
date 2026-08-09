@@ -25,6 +25,17 @@ test('parses markdown-escaped JSON inside fenced block', () => {
   assert.deepEqual(value, { decision_: 'WAIT' });
 });
 
+test('unescapes escaped punctuation in arrays and object braces', () => {
+  const value = extractJson(
+    '{"order":{"entry":65170,"acceptable\\_price\\_range":\\[65170,65190\\]},"decision":"LONG","take\\_profit":\\[{"price":65245,"close\\_percent":30}\\]}',
+  );
+  assert.deepEqual(value, {
+    order: { entry: 65170, acceptable_price_range: [65170, 65190] },
+    decision: 'LONG',
+    take_profit: [{ price: 65245, close_percent: 30 }],
+  });
+});
+
 test('rejects missing JSON', () => {
   assert.throws(() => extractJson('no decision here'));
 });

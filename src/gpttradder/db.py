@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS daily_reports (
     sent INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS bridge_sends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_id TEXT NOT NULL,
+    client_message_id TEXT NOT NULL,
+    message_sha256 TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -98,6 +106,30 @@ class Database:
     def update_cycle_status(self, cycle_id: UUID, status: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE cycles SET status=? WHERE cycle_id=?", (status, str(cycle_id)))
+
+    def record_bridge_send(
+        self,
+        cycle_id,
+        client_message_id: str,
+        message_sha256: str,
+        attempt: int,
+    ) -> None:
+        """Persist one ChatGPT bridge send attempt (idempotency audit trail)."""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO bridge_sends(cycle_id, client_message_id, message_sha256, attempt)
+                VALUES (?, ?, ?, ?)""",
+                (str(cycle_id), client_message_id, message_sha256, int(attempt)),
+            )
+
+    def get_bridge_sends(self, cycle_id: str, limit: int = 100) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT cycle_id, client_message_id, message_sha256, attempt, created_at
+                FROM bridge_sends WHERE cycle_id=? ORDER BY id LIMIT ?""",
+                (str(cycle_id), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def save_decision(self, decision: Decision) -> bool:
         try:

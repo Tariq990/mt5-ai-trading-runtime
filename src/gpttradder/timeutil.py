@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
+from typing import Callable, Sequence
 
 from .symbols import exposure_group_of
 
 # Exposure groups whose market session follows the classic FX calendar (closed
 # from Friday evening until Sunday evening UTC). Crypto never closes.
 FX_CALENDAR_GROUPS = frozenset({"usd_fx", "metal"})
+
+# Broker clock auto-detection (see measure_broker_utc_offset_hours).
+BROKER_OFFSET_MIN_HOURS = -14.0
+BROKER_OFFSET_MAX_HOURS = 14.0
+BROKER_OFFSET_GRID_HOURS = 0.25
+# A quote older than this cannot anchor an offset measurement (weekend-replayed
+# quotes would skew the result); such probes are discarded.
+BROKER_OFFSET_MAX_QUOTE_AGE_HOURS = 0.5
+# Candidate symbols probed at connect time, before canonical resolution exists
+# (liquid FX names that every retail MT5 server carries when sessions are open).
+OFFSET_PROBE_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "EURJPY", "USDCAD", "AUDUSD", "USDCHF", "EURGBP")
 
 
 def normalize_broker_epoch(epoch_seconds: float, server_utc_offset_hours: float) -> datetime:
@@ -73,3 +86,52 @@ def market_session_open(
             reason += "; unclassified symbol assumed to follow the FX calendar"
         return False, reason
     return True, None
+
+
+def broker_utc_offset_plausible(offset_hours: float) -> bool:
+    """A broker clock offset is only plausible inside the retail MT5 band."""
+    return BROKER_OFFSET_MIN_HOURS <= offset_hours <= BROKER_OFFSET_MAX_HOURS
+
+
+def round_broker_offset_hours(offset_hours: float) -> float:
+    """Quantize to the 15-minute grid real broker clocks use (2.0, 3.0, 4.5...)."""
+    return round(offset_hours / BROKER_OFFSET_GRID_HOURS) * BROKER_OFFSET_GRID_HOURS
+
+
+def measure_broker_utc_offset_hours(
+    tick_probe: Callable[[str], float | None],
+    candidates: Sequence[str] = OFFSET_PROBE_SYMBOLS,
+    now_fn: Callable[[], float] = time.time,
+) -> float | None:
+    """Auto-detect the broker server clock offset by probing live ticks.
+
+    An MT5 tick is stamped in the server clock: ``tick_msc / 1000`` equals the
+    server's wall clock as if it were a Unix epoch. For a fresh quote,
+    ``tick_epoch - utc_now`` therefore equals the server's offset (UTC+3 for
+    EEST). Only probes whose quotes are near-fresh are usable; the freshest one
+    (largest delta) anchors the result, quantized to the 15-minute grid. Returns
+    None when no usable probe exists (e.g. full weekend closure) — callers fail
+    closed.
+    """
+    best: float | None = None
+    for symbol in candidates:
+        epoch = tick_probe(symbol)
+        if epoch is None:
+            continue
+        delta_hours = (epoch - now_fn()) / 3600.0
+        # Negative delta = quote stamped "in the future" relative to UTC only
+        # when the offset itself is negative (unheard of for MT5); also accept
+        # a small margin for clock jitter. Quotes older than the freshness cap
+        # carry no offset signal and are discarded.
+        if delta_hours < BROKER_OFFSET_GRID_HOURS / -2.0:
+            continue
+        if -delta_hours > BROKER_OFFSET_MAX_QUOTE_AGE_HOURS:
+            continue
+        if best is None or delta_hours > best:
+            best = delta_hours
+    if best is None:
+        return None
+    rounded = round_broker_offset_hours(best)
+    if not broker_utc_offset_plausible(rounded):
+        return None
+    return rounded

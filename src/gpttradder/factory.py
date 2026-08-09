@@ -6,6 +6,7 @@ from .broker.simulated import SimulatedBroker
 from .collector import MarketCollector
 from .config import Settings
 from .db import Database
+from .decision.base import DecisionProvider
 from .decision.http_bridge import HTTPDecisionBridge
 from .decision.mock import WaitDecisionProvider
 from .notifications import build_notification_service
@@ -24,6 +25,9 @@ def build_orchestrator(settings: Settings, use_mock_decision: bool = False) -> T
     collector = MarketCollector(broker, settings)
     db = Database(settings.db_path)
     safety = SafetyEngine(settings)
-    decisions = WaitDecisionProvider() if use_mock_decision else HTTPDecisionBridge(settings)
+    if use_mock_decision:
+        decisions: DecisionProvider = WaitDecisionProvider()
+    else:
+        decisions = HTTPDecisionBridge(settings, on_send=db.record_bridge_send)
     notifications = build_notification_service(settings, db)
     return TradingOrchestrator(broker, collector, decisions, safety, db, notifications)

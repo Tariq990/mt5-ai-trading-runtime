@@ -43,6 +43,7 @@ The following has already been achieved and MUST NOT regress:
 - 63 tests passing (baseline v0.3.0).
 - 100 tests passing after the v0.4.0 upgrade (full suite: `python -m pytest -q`).
 - 121 Python tests + 15 node bridge tests passing after the v0.4.0 hardening pass (clock normalization + executable status).
+- 142 Python tests + 18 node bridge tests passing after the Fix 4 (v0.4.0) release-blocking pass — auto-measured broker clock, deterministic bridge messages, live MT5 revalidation all green.
 - `python -m compileall -q src` passes.
 - End-to-end smoke cycle passes with the simulated broker (`once --mock` -> SKIPPED/WAIT).
 - Preflight passes with the simulated broker: all five canonical symbols resolved
@@ -129,6 +130,85 @@ Corrections (all fail closed):
 
 Regression coverage: `tests/test_time_status.py` (14 tests) — unit tests for
 the clock/calendar helpers plus collector/safety/MT5-adapter integration.
+
+## Fix 4 — Broker clock auto-measurement + deterministic ChatGPT bridge messages
+
+Two release-blocking issues found during final verification against the live
+MT5 demo:
+
+1. **Stale hardcoded clock assumption.** Fix 3 kept `GPTTRADDER_BROKER_SERVER_UTC_OFFSET_HOURS`
+   with a 2.0h default. Live measurement (Raw Trading demo account 52996387,
+   build 6104) proved the server runs **UTC+3 (EEST)** — EURUSD tick `time_msc`
+   was +2.995h vs UTC. Any hardcoded value (winter EET) silently shifts fresh
+   quotes 1h into the future.
+
+2. **Nondeterministic ChatGPT message between retries.** `digest.mjs` computed
+   `quote_age_s` from `Date.now()` at render time. Every retry rebuilt a
+   DIFFERENT message for the same `client_message_id`, which the browser MCP's
+   dedup correctly rejected with `client_message_id ... is already associated
+   with different message text` → infinite 502 storms.
+
+Corrections (all fail closed):
+
+- `timeutil.py` — `measure_broker_utc_offset_hours()` probes fresh ticks
+  (`tick_msc` encodes the server wall clock), keeps only near-fresh samples,
+  quantizes to the 15-minute grid, rejects implausible results; `broker_utc_offset_plausible`
+  bounds the band (-14..+14h).
+- `mt5_demo.py` — offset is AUTO-DETECTED at `connect()` and re-measured every
+  `resolve_symbols()` (DST-safe: EET↔EEST shifts are picked up automatically).
+  An explicit `GPTTRADDER_BROKER_SERVER_UTC_OFFSET_HOURS` override
+  (`server_utc_offset_hours`) is validated against the live measurement:
+  |override − measured| ≥ 0.5h → RuntimeError (fail closed).
+  Unmeasurable (full weekend closure) + no override → fail closed at connect.
+  `preflight.py` reports a `broker_clock` check with the attribution
+  ("auto-measured 3h", "consistent with measured 3h", ...).
+- `config.py` — `broker_server_utc_offset_hours` default is now `None` (auto);
+  an explicit value is an override, not the default.
+- `digest.mjs` — message is fully deterministic: quote ages are computed against
+  the FIXED packet reference instant (`packet_created_at`), never `Date.now()`.
+  Repeated renders are byte-identical.
+- `server.mjs` — renders the message once per cycle, hashes it (SHA-256), and
+  rejects a same-cycle re-render whose fingerprint differs (fail loudly BEFORE
+  dispatch); forwards `message_sha256` with the send.
+- `http_bridge.py` — the complete POST payload is FROZEN once per cycle
+  (canonical sort + compact JSON), one SHA-256 fingerprint, one
+  `client_message_id` (`gpttradder:<cycle_id>`); every retry reuses the
+  byte-identical body. Re-freezing the same cycle with different content is
+  impossible (RuntimeError). Deterministic repeated errors still fail fast.
+- `db.py` — new `bridge_sends` table persists every attempt's
+  `cycle_id / client_message_id / message_sha256 / attempt` (audit trail;
+  factory wires it via `on_send`).
+- `json.mjs` — markdown-escape unescaping extended to `[ ] { } | + ~ ` `
+  (ChatGPT web renders arrays/objects with `\[` `\]`; the live reply used
+  `acceptable\_price\_range":\[65170,65190\]`).
+- `models.py` — lenient-but-safe ChatGPT shorthand parsing: scalar
+  `take_profit` coerces to one full-size target; `{min,max}` coercion for
+  `acceptable_price_range`; ambiguous multi-scalar TP fails closed
+  ("close_percent total cannot exceed 100").
+- Prompt (both hash-synced copies) now documents the exact
+  `take_profit` JSON target form (`[{"price":..., "close_percent":...}]`) and
+  that bare numbers are schema-invalid.
+
+Live revalidation (Raw Trading MT5 Demo, account 52996387, 2026-08-10):
+
+- `broker_clock: 3h (auto-measured 3h)` — measured EEST offset confirmed.
+- Preflight: ALL PASS — all five canonical symbols resolve (BTCUSD, ETHUSD,
+  XAUUSD, EURUSD, GBPUSD); contracts FULL; BTC quote_age 0.4s, EURUSD 13.3s,
+  GBPUSD 7.2s (normalized to UTC, fresh).
+- `verify-mt5-write`: pending order placed (ticket 1849030789) and cancelled —
+  PASS.
+- Real ChatGPT cycle: LONG BTC → STOP @65170 size 0.87, SL 65055,
+  TP 65245@30% / 65350@70% → live pending order placed on the demo (ticket
+  1849033187, retcode 10009 PLACED), then removed for a clean handover.
+- bridge_sends audit rows persisted (1 send, frozen sha stable).
+
+Regression coverage: `tests/test_time_status.py` (8 new: +2/+3 auto-detect,
+DST transition, contradicting override fails closed, unmeasurable fails closed,
+stale-quote discard) + `tests/test_bridge_idempotency.py` (6 new: byte-identical
+retries A, persisted attempts A2, same-cycle divergence B, new-cycle C, cached
+reuse D, transport-retry single execution E) + `tests/test_models.py` (5 new:
+TP coercion/rejection, price-range coercion) + node `digest.test.mjs` (2 new:
+determinism, fixed reference) + `json.test.mjs` (1 new: escaped arrays).
 
 # CORE ARCHITECTURAL CONTRACT
 

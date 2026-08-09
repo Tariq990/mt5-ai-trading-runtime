@@ -25,7 +25,12 @@ from gpttradder.models import (
 )
 from gpttradder.safety import SafetyEngine
 from gpttradder.symbols import resolve_canonical_symbols
-from gpttradder.timeutil import market_session_open, normalize_broker_epoch, quote_is_fresh
+from gpttradder.timeutil import (
+    market_session_open,
+    normalize_broker_epoch,
+    quote_age_seconds,
+    quote_is_fresh,
+)
 
 UTC = timezone.utc
 
@@ -311,7 +316,7 @@ def test_future_quote_fails_stale_symbol_quote_gate():
 
 
 # ---------------------------------------------------------------------------
-# MT5 adapter: server-clock normalization (FakeMT5, no terminal needed)
+# MT5 adapter: server-clock auto-detection (FakeMT5, no terminal needed)
 # ---------------------------------------------------------------------------
 
 
@@ -321,6 +326,13 @@ class FakeMT5:
     POSITION_TYPE_BUY = 0
     ORDER_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
+
+    def __init__(self, server_offset_hours=3.0, tick_symbols=None):
+        # tick_symbols=None: every probed symbol returns a live tick (the broker
+        # clock is `server_offset_hours` ahead of UTC). A non-empty set restricts
+        # ticks to those names, simulating a fully closed market otherwise.
+        self.server_offset_hours = server_offset_hours
+        self.tick_symbols = tick_symbols
 
     def account_info(self):
         return SimpleNamespace(login=1, trade_mode=0, balance=1, equity=1, margin_free=1, margin_mode=2)
@@ -344,28 +356,114 @@ class FakeMT5:
         return True
 
     def symbol_info_tick(self, symbol):
-        server_now = datetime.now(timezone.utc) + timedelta(hours=3)  # broker clock: UTC+3 (EEST)
+        if self.tick_symbols is not None and symbol not in self.tick_symbols:
+            return None
+        server_now = datetime.now(timezone.utc) + timedelta(hours=self.server_offset_hours)
         return SimpleNamespace(bid=64990.0, ask=65000.0, time=int(server_now.timestamp()), time_msc=int(server_now.timestamp() * 1000))
 
     def last_error(self):
         return (0, "ok")
 
 
-async def test_mt5_quote_timestamp_normalized_from_server_clock_to_utc():
-    fake = FakeMT5()
-    broker = MT5DemoBroker(server_utc_offset_hours=3.0)  # EEST summer offset
+def test_measure_broker_utc_offset_from_fresh_ticks():
+    from gpttradder.timeutil import measure_broker_utc_offset_hours
+
+    now = datetime.now(timezone.utc).timestamp()
+    probes = {
+        "EURUSD": (now + 3 * 3600) * 1000,   # fresh +3h quote
+        "GBPUSD": (now + 2.99 * 3600) * 1000,
+    }
+    measured = measure_broker_utc_offset_hours(lambda s: probes.get(s) and probes[s] / 1000.0, ["EURUSD", "GBPUSD"])
+    assert measured == 3.0
+
+    probes2 = {"EURUSD": (now + 2 * 3600 - 30) * 1000}  # fresh +2h quote, 30s age
+    measured2 = measure_broker_utc_offset_hours(lambda s: probes2.get(s) and probes2[s] / 1000.0, ["EURUSD"])
+    assert measured2 == 2.0
+
+
+def test_measure_broker_utc_offset_discards_stale_weekend_quotes():
+    from gpttradder.timeutil import measure_broker_utc_offset_hours
+
+    now = datetime.now(timezone.utc).timestamp()
+    stale = {"EURUSD": (now - 3.5 * 3600) * 1000}  # Friday's quote re-emitted on Saturday
+    assert measure_broker_utc_offset_hours(lambda s: stale.get(s) and stale[s] / 1000.0, ["EURUSD"]) is None
+
+
+def test_measure_broker_utc_offset_implausible_and_missing_return_none():
+    from gpttradder.timeutil import measure_broker_utc_offset_hours
+
+    now = datetime.now(timezone.utc).timestamp()
+    impossible = {"EURUSD": (now + 30 * 3600) * 1000}
+    assert measure_broker_utc_offset_hours(lambda s: impossible.get(s) and impossible[s] / 1000.0, ["EURUSD"]) is None
+    assert measure_broker_utc_offset_hours(lambda s: None, ["EURUSD", "GBPUSD"]) is None
+
+
+async def test_mt5_auto_detect_utc_plus_3_normalizes_to_utc():
+    fake = FakeMT5(server_offset_hours=3.0)
+    broker = MT5DemoBroker()  # auto-detect, no override
     broker.mt5 = fake
     await broker.resolve_symbols(["BTC"], {})
+    assert broker.server_utc_offset_hours == 3.0
+    assert broker.offset_attribution.startswith("auto-measured")
     quote = await broker.get_quote("BTCUSD")
     now = datetime.now(timezone.utc)
     assert abs((now - quote.ts).total_seconds()) < 5  # normalized back to real UTC
+    assert quote_age_seconds(quote.ts) > -1
 
 
-async def test_mt5_default_offset_leaves_quote_in_the_future_not_fresh():
-    fake = FakeMT5()
-    broker = MT5DemoBroker()  # default 2.0 while the server is really +3 -> quote lands 1h ahead
+async def test_mt5_auto_detect_utc_plus_2():
+    fake = FakeMT5(server_offset_hours=2.0)
+    broker = MT5DemoBroker()
     broker.mt5 = fake
     await broker.resolve_symbols(["BTC"], {})
+    assert broker.server_utc_offset_hours == 2.0
     quote = await broker.get_quote("BTCUSD")
-    age = (datetime.now(timezone.utc) - quote.ts).total_seconds()
-    assert -3610 < age < -3590  # future-skewed, so freshness gates will fail closed
+    assert abs((datetime.now(timezone.utc) - quote.ts).total_seconds()) < 5
+
+
+async def test_mt5_dst_transition_remeasured_each_cycle():
+    fake = FakeMT5(server_offset_hours=2.0)
+    broker = MT5DemoBroker()
+    broker.mt5 = fake
+    await broker.resolve_symbols(["BTC"], {})
+    assert broker.server_utc_offset_hours == 2.0
+    fake.server_offset_hours = 3.0  # EET -> EEST shift
+    await broker.resolve_symbols(["BTC"], {})
+    assert broker.server_utc_offset_hours == 3.0
+
+
+async def test_mt5_configured_override_consistent_with_measurement():
+    fake = FakeMT5(server_offset_hours=3.0)
+    broker = MT5DemoBroker(server_utc_offset_hours=3.0)
+    broker.mt5 = fake
+    await broker.resolve_symbols(["BTC"], {})
+    assert broker.server_utc_offset_hours == 3.0
+    assert "consistent" in broker.offset_attribution
+
+
+async def test_mt5_configured_override_contradicting_measurement_fails_closed():
+    fake = FakeMT5(server_offset_hours=3.0)
+    broker = MT5DemoBroker(server_utc_offset_hours=2.0)  # stale config from winter
+    broker.mt5 = fake
+    with pytest.raises(RuntimeError, match="contradicts the measured"):
+        await broker.resolve_symbols(["BTC"], {})
+
+
+async def test_mt5_unmeasurable_without_override_fails_closed():
+    fake = FakeMT5(server_offset_hours=3.0, tick_symbols={"BTCUSD"})
+    broker = MT5DemoBroker()
+    broker.mt5 = fake
+    with pytest.raises(RuntimeError, match="Unable to measure the broker server UTC offset"):
+        await broker.resolve_symbols(["BTC"], {})
+
+
+async def test_mt5_unmeasurable_with_override_keeps_override_and_gates_fail_closed():
+    fake = FakeMT5(server_offset_hours=3.0, tick_symbols={"BTCUSD"})
+    broker = MT5DemoBroker(server_utc_offset_hours=2.0)
+    broker.mt5 = fake
+    await broker.resolve_symbols(["BTC"], {})
+    assert broker.server_utc_offset_hours == 2.0
+    quote = await broker.get_quote("BTCUSD")
+    age = quote_age_seconds(quote.ts)
+    assert -3610 < age < -3590  # still +1h future under the stale override: gates fail closed
+    assert not quote_is_fresh(quote.ts, max_age_seconds=90, future_skew_tolerance_seconds=5)

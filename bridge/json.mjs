@@ -1,41 +1,37 @@
-const JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+// ChatGPT web renders some punctuation in assistant replies with Markdown
+// escapes (e.g. cycle\_id). `\_` is not a valid JSON escape, so those replies
+// must be Markdown-unescaped before extraction. The patterns below never
+// appear in valid JSON, so the rewrite is safe for real JSON strings too.
+const MARKDOWN_ESCAPES = [
+  ['\\_', '_'],
+  ['\\*', '*'],
+  ['\\#', '#'],
+  ['\\-', '-'],
+  ['\\>', '>'],
+  ['\\[', '['],
+  ['\\]', ']'],
+  ['\\{', '{'],
+  ['\\}', '}'],
+  ['\\|', '|'],
+  ['\\+', '+'],
+  ['\\~', '~'],
+  ['\\`', '`'],
+];
 
-// ChatGPT markdown output escapes punctuation inside JSON (e.g. cycle\_id).
-// Valid JSON escapes are preserved; any other backslash is markdown escaping
-// and is dropped so JSON.parse can accept the payload.
-export function normalizeMarkdownEscapes(text) {
-  let out = '';
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (ch === '\\' && i + 1 < text.length) {
-      const next = text[i + 1];
-      if (JSON_ESCAPES.has(next)) {
-        out += ch + next;
-        i += 1;
-      } else {
-        out += next;
-        i += 1;
-      }
-    } else {
-      out += ch;
-    }
-  }
+export function unescapeMarkdown(text) {
+  let out = String(text ?? '');
+  for (const [from, to] of MARKDOWN_ESCAPES) out = out.split(from).join(to);
   return out;
 }
 
-function parseJson(text) {
-  try { return JSON.parse(text); } catch {}
-  return JSON.parse(normalizeMarkdownEscapes(text));
-}
-
 export function extractJson(text) {
-  const raw = String(text || '').trim();
+  const raw = unescapeMarkdown(text).trim();
   if (!raw) throw new Error('ChatGPT returned an empty response');
-  try { return parseJson(raw); } catch {}
+  try { return JSON.parse(raw); } catch {}
 
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced) {
-    try { return parseJson(fenced[1].trim()); } catch {}
+    try { return JSON.parse(fenced[1].trim()); } catch {}
   }
 
   let depth = 0;
@@ -58,7 +54,7 @@ export function extractJson(text) {
       depth -= 1;
       if (depth === 0 && start >= 0) {
         const candidate = raw.slice(start, i + 1);
-        try { return parseJson(candidate); } catch { start = -1; }
+        try { return JSON.parse(candidate); } catch { start = -1; }
       }
     }
   }
