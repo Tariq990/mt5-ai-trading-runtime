@@ -1,0 +1,107 @@
+name: Publish GPTTRADDER 0.3.0
+
+on:
+  push:
+    branches:
+      - agent/release-0.3.0
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct audited release from Git blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/gpttradder.b64
+          SHAS=(
+            9c2366a13044af4710a4f654554820b6f2cdfe5d
+            6ca49b453205e9f5bc5be6d4c40f1e614bc19fe3
+            45a924ef37ca32d848b6461201a744a2beb5feeb
+            f1d12ccd589230fe5512d669cffaa593d04bb7d6
+            056a2dd2c6d16d07beb4ee3aa2dd354113598ba6
+            780f6a9cc64a4e60c003503d3d73e3d62657d880
+            96472c4120b553b4309c886a14e736a399ed0601
+            979ce26c5b58d401f84978659836523bad356d74
+            ac854eff6da96d319c2f9c4dd372a929d74249ef
+            269e725dc56cc5ca4db69e93f7825b441868e64b
+            1f2c4cce6f1cb8a2daf3ee19ade7ffbe49fbc460
+            63161c452e172c27aa8e56c273781b2124846b7a
+            3c7205786192b1682416ab148e574fe42046ed83
+            6185031cced6abbbfca2fa97d6e5a667c4805a1c
+            4a0910372502501532323d6764ce7fc2074cd4e6
+            54357affa51eb3ba61ec71a7f7026a91382b9371
+            b8412f33c947119b0cf1fd009410398ac25e5833
+            3dd07d473aa3752806fb15fb4f5ce70109d66d69
+            41bf72a8129b8e5efb3abafaa1446ec44d26af22
+            506064ea2ff2edb1b7df657d57591504265692a6
+            af78aac7c5329822ba7150cea9877e191cec3b9a
+            41403b0eb4f3fef6485e0ee709fefc86c8ffa4bf
+            5ffba1c6ec24c572721f00d178cb84b889282190
+            3bf587ac00e2be7662b23e9050bdd2e5bdc6764b
+            88c34fa3695ff9207573a8a2b7b2d33fc6be68c8
+            7fc247eb03ede466879ede2bf3679ba0517a61d6
+            13e5f8e59712ae9bac7d00546f81fad06375c2ec
+            2e6a69d11c88c37dc64ff6b51c0d752ee0fc8b20
+            9e0ed3a86a4f8e5d6a576140bb0dbb9c8a813b15
+            e2ab065dedefea279a976ab39d3cdb3b5f1c4675
+            6276ae185ec1aaeae4c2e631e010957c43df353b
+            22a4245ef45ab9d4ef0a731cfc8abce9235aba17
+            f4c0976439adffe9f69a24c11815dcf1e437b85a
+            a46df063fb0a6097cbfbf9a22afdf17ea93b1c79
+            3de6a1462422147ddff424bbe152ac89f58ede63
+          )
+          for sha in "${SHAS[@]}"; do
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/git/blobs/${sha}" \
+              | jq -r '.content' \
+              | tr -d '\n' \
+              | base64 -d >> /tmp/gpttradder.b64
+          done
+          base64 -d /tmp/gpttradder.b64 > /tmp/GPTTRADDER-0.3.0.zip
+          echo "7869f53dce36bf4c3027fc2e416f75fb52429178193b063b71f67ad45233a6e5  /tmp/GPTTRADDER-0.3.0.zip" | sha256sum -c -
+
+      - name: Replace branch with exact audited release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import shutil
+          import zipfile
+
+          for name in os.listdir('.'):
+              if name == '.git':
+                  continue
+              path = os.path.join('.', name)
+              if os.path.isdir(path) and not os.path.islink(path):
+                  shutil.rmtree(path)
+              else:
+                  os.remove(path)
+
+          with zipfile.ZipFile('/tmp/GPTTRADDER-0.3.0.zip') as archive:
+              archive.extractall('.')
+          PY
+
+      - name: Commit exact 0.3.0 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "publish GPTTRADDER 0.3.0"
+          git push origin HEAD:agent/release-0.3.0
