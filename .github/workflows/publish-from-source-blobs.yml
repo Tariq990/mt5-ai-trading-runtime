@@ -1,0 +1,149 @@
+name: Publish GPTTRADDER 0.3.0 from source blobs
+
+on:
+  push:
+    branches:
+      - agent/publish-0.3.0
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct exact audited source tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/files.tsv <<'EOF'
+          .env.example|1f15c1b69605c189832119060f5030de65ce0be7
+          .github/workflows/ci.yml|77cbf87ef6a39a0eb51d1a531b556ce1a5393ba7
+          .gitignore|cebdca137d523406114ca8c7972650fe6170229b
+          README.md|1feb0c4ac2fd926621841a24b93ce43bd52424b2
+          bridge/json.mjs|53eb6276e6a90228eba42fcbce1fe2e1ec48e1b5
+          bridge/json.test.mjs|31088f1056d1684229bd5228941986be6ab22430
+          bridge/package.json|b848b76e6006b834921eafe8b0b0d06bc6b03d9f
+          bridge/sdk-loader.mjs|c8bef9bb4169eb181f73620d85731b4a5918a52b
+          bridge/sdk-loader.test.mjs|e256c11eef5ffd59acf991329e95b751c6e843de
+          bridge/server.mjs|0151346ff6c7bc26eab0471b8ef43cf8a5bbddf2
+          docs/ARCHITECTURE.md|52e2c9ccb8d27d7e5fa8bf434b9a6d2678dc9993
+          docs/BRIDGE_PROTOCOL.md|2f3b99da75006980f241ff941d51e3ffceaca552
+          docs/OPERATIONS.md|e57337e48dff9343c9c36caebb605709d614c1fc
+          prompts/chatgpt_decision_prompt.md|2fd00a14a008d6976310d1918a05a2ec6166250b
+          prompts/deepseek_orchestrator_prompt.md|f1346091211e081971d8d15debc762537fccf469
+          pyproject.toml|eafdb656e99393675de30b2e9ffd1a30af48c508
+          src/gpttradder/__init__.py|493f7415d73d5d2a0875222a1c7296000935cccc
+          src/gpttradder/api.py|ba2e079af27dac310b6d22d24d6c5d9e6cd49866
+          src/gpttradder/assets/__init__.py|e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+          src/gpttradder/assets/bridge/json.mjs|53eb6276e6a90228eba42fcbce1fe2e1ec48e1b5
+          src/gpttradder/assets/bridge/json.test.mjs|31088f1056d1684229bd5228941986be6ab22430
+          src/gpttradder/assets/bridge/package.json|b848b76e6006b834921eafe8b0b0d06bc6b03d9f
+          src/gpttradder/assets/bridge/sdk-loader.mjs|c8bef9bb4169eb181f73620d85731b4a5918a52b
+          src/gpttradder/assets/bridge/sdk-loader.test.mjs|e256c11eef5ffd59acf991329e95b751c6e843de
+          src/gpttradder/assets/bridge/server.mjs|0151346ff6c7bc26eab0471b8ef43cf8a5bbddf2
+          src/gpttradder/assets/prompts/chatgpt_decision_prompt.md|2fd00a14a008d6976310d1918a05a2ec6166250b
+          src/gpttradder/autostart.py|1bf9841056154e7805def4ea834dd0194483103d
+          src/gpttradder/broker/base.py|32490e57477788763371e73e4bff71b45f2e0977
+          src/gpttradder/broker/mt5_demo.py|fc43d6c0d6fe6e7e2943425c5de0fdc6d3238e8c
+          src/gpttradder/broker/simulated.py|835fe3eb04c0e802bc3b83ad3c571b4a171772e9
+          src/gpttradder/cli.py|7f62432716ba05e2bee94d3ae592fc416ba4a303
+          src/gpttradder/collector.py|7b5e112e46e7c6c34a8f1d082962c68a039217b8
+          src/gpttradder/config.py|70eb7f007ccfd0bd5a1fda5aba064a00be33eba4
+          src/gpttradder/dashboard.py|fb3b1ab4be81c089c7411ce7875a3626cb55fb57
+          src/gpttradder/db.py|cf321b82bb2ea4b6ce2c30787f3bb877b27686c5
+          src/gpttradder/decision/base.py|089da728e1b0199840538d2c25fd9daf8dfd1156
+          src/gpttradder/decision/http_bridge.py|9c14c1cc0dd5cbbe839775cd992dbb7c82140406
+          src/gpttradder/decision/mock.py|4564371c32d064e38bae74e51b4f3260de018274
+          src/gpttradder/event_monitor.py|00e25f0a6beedead569cd6ebadf15af75aaf04ee
+          src/gpttradder/factory.py|67962d6ca57d0f94e1da2a7adaf7ed3a36863be1
+          src/gpttradder/hashing.py|ef2c4dc4db1b95cb0c8ffb32408f0b6a965528c8
+          src/gpttradder/logging_setup.py|38a8c17eb35ab91825cd7d39785c6f763e441637
+          src/gpttradder/models.py|d3c2103a5c34f0da78b952b194155dcfa287262a
+          src/gpttradder/notifications.py|a51ac759f7e75e94e2b8a81ea1d1730300fb3415
+          src/gpttradder/orchestrator.py|5e61f312e38e9fa7c3a14e7d34ba9eacd2823e3e
+          src/gpttradder/preflight.py|336838b595e8eb1fc573c1f179fbeebf2067eb3e
+          src/gpttradder/reports.py|86b5fc14ef3f6537cde5b0e34649049632795f84
+          src/gpttradder/resources.py|f2c6e75b303f9f5ba468967feaf26eddf81679b6
+          src/gpttradder/runtime.py|24f64bdc40c532ba9f988dd1ef8405762c471e9a
+          src/gpttradder/safety.py|79a74984a14334703c87f96a7ed8755e6619a2f3
+          src/gpttradder/verification.py|48bc298fb0d1165c232de2744720e257cd91c640
+          src/gpttradder/watchdog.py|9fdd46b8e80717ad321bfce2f6ba6e8fb262ebc3
+          src/gpttradder/webapp.py|46cfeb6d1466a149a2fcff8bf9d68185bb271325
+          tests/test_api.py|de77d727cb1004ecff94d3e64feec155942e31cb
+          tests/test_autostart.py|ba44c4514456c2d896abd386bca243b9ebae3a51
+          tests/test_dashboard.py|20fb6f7f4ee201ede8911cd2631a29d63bb242e5
+          tests/test_db_operations.py|f3be0eebcab229a7f941c6bc2e5c1e013b2487ee
+          tests/test_event_monitor.py|93fc797fb7962248ba9683af38f04a2a539f2648
+          tests/test_idempotency.py|28f60fab458eebfa4523a8878923d23f888f2e13
+          tests/test_models.py|9c70fdd8564857a0824bf5b9374459cbe4b656cd
+          tests/test_mt5_adapter.py|b9721c7437670d8bad969da6b9a312bb96c0237e
+          tests/test_notifications.py|4a0f39969a2bfc0cef4ad40913ae357dbd50d149
+          tests/test_orchestrator.py|0b1d3e5c89246f61814cce8a9e31beca3f3312be
+          tests/test_preflight_notifications.py|56d3fbaf1b1c606b80656a8b8770a2e6130989c5
+          tests/test_reports.py|4b8a1397dd557538eddd8e285543f9ef1c48fbc2
+          tests/test_resources.py|f98621874b83b626560c768c012ac3f8b492c4f4
+          tests/test_safety.py|3f4e64324c04d2d0f07f3fca584e7c9cfd2b2af2
+          tests/test_simulated_broker.py|e1ad7e12d362cfb35c25c27b78253905f75e52b2
+          tests/test_watchdog.py|225dfb1dc5407a2546abaf6dc034b148f0ddf69a
+          EOF
+
+          python - <<'PY'
+          import os, shutil
+          for name in os.listdir('.'):
+              if name == '.git':
+                  continue
+              p = os.path.join('.', name)
+              if os.path.isdir(p) and not os.path.islink(p):
+                  shutil.rmtree(p)
+              else:
+                  os.remove(p)
+          PY
+
+          while IFS='|' read -r path sha; do
+            mkdir -p "$(dirname "$path")"
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/git/blobs/${sha}" \
+              | jq -r '.content' | tr -d '\n' | base64 -d > "$path"
+            actual=$(git hash-object "$path")
+            test "$actual" = "$sha" || { echo "SHA mismatch: $path $actual != $sha"; exit 1; }
+          done < /tmp/files.tsv
+
+          test "$(git ls-files --others --exclude-standard | wc -l)" -ge 1
+          echo "Reconstructed and verified 69 source files."
+
+      - name: Python verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          pytest -q
+          python -m compileall -q src tests
+          gpttradder smoke --mock-decision
+
+      - name: Node bridge verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check bridge/server.mjs
+          node --test bridge/json.test.mjs bridge/sdk-loader.test.mjs
+
+      - name: Publish verified tree to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "publish GPTTRADDER 0.3.0"
+          git push origin HEAD:main
