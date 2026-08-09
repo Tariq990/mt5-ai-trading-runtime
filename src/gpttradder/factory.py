@@ -31,5 +31,5 @@ def build_orchestrator(settings: Settings, use_mock_decision: bool = False) -> T
     else:
         decisions = HTTPDecisionBridge(settings, on_send=db.record_bridge_send)
     notifications = build_notification_service(settings, db)
-    review = ReviewService(settings, db, notifications)
+    review = ReviewService(settings, db)
     return TradingOrchestrator(broker, collector, decisions, safety, db, notifications, review)
