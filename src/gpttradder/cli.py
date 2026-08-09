@@ -19,6 +19,7 @@ from .preflight import run_preflight
 from .reports import build_daily_report, send_daily_report
 from .runtime import run
 from .safety import SafetyEngine
+from .review import ReviewService
 from .verification import verify_mt5_demo_write
 from .watchdog import run_watchdog
 
@@ -43,6 +44,7 @@ def main() -> None:
             "verify-mt5-write",
             "report",
             "report-send",
+            "review-test",
             "autostart-install",
             "autostart-remove",
         ],
@@ -124,6 +126,26 @@ def main() -> None:
                     force=True,
                 )
             print(report.text)
+            return
+
+        if args.command == "review-test":
+            # End-to-end review channel check: sends a TEST event to the
+            # separate gpttradder-review ChatGPT session. Advisory only —
+            # no broker connection, no trading side effects.
+            db = Database(settings.db_path)
+            review = ReviewService(settings, db)
+            if not review.enabled():
+                raise SystemExit(
+                    "Review channel is not enabled: set GPTTRADDER_REVIEW_ENABLED=true "
+                    "and GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL"
+                )
+            print(f"Review bridge: {settings.review_bridge_url}")
+            print(f"Review session key: {settings.review_session_key}")
+            data = await review.send_test_event()
+            if data is None:
+                raise SystemExit("Review TEST event was not delivered (duplicate or disabled)")
+            print("OK — TEST event delivered and confirmed by the bridge.")
+            print(f"ChatGPT response: {data.get('response') or '(empty)'}")
             return
 
         orchestrator = build_orchestrator(settings, use_mock_decision=use_mock or args.command == "smoke")

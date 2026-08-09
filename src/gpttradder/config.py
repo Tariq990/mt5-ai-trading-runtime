@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="GPTTRADDER_",
         extra="ignore",
+        populate_by_name=True,
     )
 
     env: Literal["demo"] = "demo"
@@ -57,6 +58,33 @@ class Settings(BaseSettings):
     decision_bridge_url: str = "http://127.0.0.1:8787/decision"
     decision_timeout_seconds: int = Field(default=90, ge=5, le=300)
     decision_retry_delays: list[int] = Field(default_factory=lambda: [0, 15, 30, 60])
+
+    # Post-trade/system review channel: a SEPARATE ChatGPT session
+    # (gpttradder-review) that ONLY analyses and advises. It never executes
+    # trades and never modifies parameters; failure must never block trading.
+    review_enabled: bool = False
+    review_session_key: str = Field(
+        default="gpttradder-review",
+        validation_alias="GPTTRADDER_CHATGPT_REVIEW_SESSION_KEY",
+    )
+    review_conversation_url: str | None = Field(
+        default=None,
+        validation_alias="GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL",
+    )
+    review_bridge_url: str = "http://127.0.0.1:8787/review"
+    review_timeout_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=300,
+        validation_alias="GPTTRADDER_CHATGPT_REVIEW_TIMEOUT_SECONDS",
+    )
+    review_retry_delays: list[int] = Field(default_factory=lambda: [0, 15])
+    review_periodic_hours: int = Field(default=6, ge=1, le=24)
+    review_daily_hour: int = Field(default=22, ge=0, le=23)
+    review_daily_minute: int = Field(default=0, ge=0, le=59)
+    review_check_seconds: int = Field(default=60, ge=10, le=600)
+    review_error_aggregation_window_seconds: int = Field(default=1800, ge=60, le=86400)
+    review_error_aggregate_every: int = Field(default=20, ge=2, le=1000)
 
     # Local dashboard/API. The runtime binds to loopback by default so account
     # state is not exposed to the LAN.

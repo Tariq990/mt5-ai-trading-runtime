@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
+import asyncio
+import httpx
+
 from gpttradder.collector import MarketCollector
 from gpttradder.config import Settings
 from gpttradder.db import Database
@@ -8,6 +11,7 @@ from gpttradder.decision.mock import WaitDecisionProvider
 from gpttradder.broker.simulated import SimulatedBroker
 from gpttradder.models import Decision, DecisionAction, OrderInstruction, OrderType, Quote
 from gpttradder.orchestrator import TradingOrchestrator
+from gpttradder.review import EVENT_TRADE_REJECTED, ReviewService
 from gpttradder.safety import SafetyEngine
 
 
@@ -94,3 +98,46 @@ async def test_fresh_quote_is_checked_immediately_before_execution(tmp_path):
     assert result.status == "REJECTED"
     assert "PRICE_OUTSIDE_RANGE" in result.reason
     assert await broker.get_positions() == []
+
+
+async def test_rejected_entry_fires_review_event(tmp_path):
+    """A rejected LONG/SHORT must produce a TRADE_REJECTED review event with
+    the rejection context (quote, contract, risk breakdown)."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"ok": True, "send_confirmed": True, "response": "understood"})
+
+    settings = Settings(
+        db_path=tmp_path / "test.sqlite3",
+        candle_limit=30,
+        review_enabled=True,
+        review_conversation_url="https://chatgpt.com/c/REVIEW",
+        review_retry_delays=[0],
+    )
+    db = Database(settings.db_path)
+    review = ReviewService(settings, db)
+    review._transport = httpx.MockTransport(handler)  # type: ignore[attr-defined]
+    broker = SimulatedBroker()
+    orchestrator = TradingOrchestrator(
+        broker=broker,
+        collector=MarketCollector(broker, settings),
+        decisions=LongProvider(size=1.0),  # oversized -> monetary-risk rejection
+        safety=SafetyEngine(settings),
+        db=db,
+        review=review,
+    )
+    await broker.connect()
+    result = await orchestrator.run_cycle(reason="review-hook")
+    assert result is not None
+    assert result.status == "REJECTED"
+    await asyncio.gather(*list(review._pending_tasks))
+
+    assert len(calls) == 1
+    body = calls[0]
+    assert "SIZE_EXCEEDS_RISK" in body
+    assert "reviewer" in body.lower()
+    rows = db.get_review_events(event_type=EVENT_TRADE_REJECTED)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "SENT"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
 import uvicorn
 
@@ -76,10 +77,19 @@ async def run(settings: Settings, use_mock_decision: bool = False) -> None:
             await orchestrator.run_cycle(trigger="POLL", reason="scheduled_scan")
             await asyncio.sleep(settings.poll_seconds)
 
+    async def review_loop() -> None:
+        review = orchestrator.review
+        if review is None:
+            return
+        while True:
+            await asyncio.sleep(settings.review_check_seconds)
+            await review.process_pending(now=datetime.now(timezone.utc))
+
     tasks = [
         asyncio.create_task(scheduled_loop(), name="scheduled-cycle"),
         asyncio.create_task(monitor.run(), name="event-monitor"),
         asyncio.create_task(_heartbeat_loop(orchestrator, settings), name="runtime-heartbeat"),
+        asyncio.create_task(review_loop(), name="review-channel"),
     ]
     if settings.daily_report_enabled and orchestrator.notifications:
         tasks.append(

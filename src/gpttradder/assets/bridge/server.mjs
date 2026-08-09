@@ -25,6 +25,11 @@ const mcpDir = process.env.GPTTRADDER_BROWSER_MCP_DIR;
 const sessionKey = process.env.GPTTRADDER_CHATGPT_SESSION_KEY || 'gpttradder';
 const conversationUrl = process.env.GPTTRADDER_CHATGPT_CONVERSATION_URL || '';
 const timeoutSeconds = Number(process.env.GPTTRADDER_CHATGPT_TIMEOUT_SECONDS || 180);
+// Review channel: a SEPARATE ChatGPT session that only analyses/advisory.
+// It must NEVER share the trading session/conversation.
+const reviewSessionKey = process.env.GPTTRADDER_CHATGPT_REVIEW_SESSION_KEY || 'gpttradder-review';
+const reviewConversationUrl = process.env.GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL || '';
+const reviewTimeoutSeconds = Number(process.env.GPTTRADDER_CHATGPT_REVIEW_TIMEOUT_SECONDS || 90);
 
 if (!mcpDir) {
   throw new Error('GPTTRADDER_BROWSER_MCP_DIR is required (example: C:\\Tools\\chatgpt-zcode-browser-mcp).');
@@ -80,6 +85,31 @@ async function ensureSession() {
   }));
 }
 
+async function ensureReviewSession() {
+  if (!reviewConversationUrl) {
+    throw new Error('GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL is not set; review channel disabled');
+  }
+  if (reviewSessionKey === sessionKey) {
+    throw new Error('review session key must differ from the trading session key');
+  }
+  const list = toolPayload(await client.callTool({ name: 'chatgpt_list_sessions', arguments: {} }));
+  const sessions = list?.sessions || [];
+  const existing = sessions.find((s) => s.session_key === reviewSessionKey);
+  if (existing) {
+    if (existing.conversation_url !== reviewConversationUrl) {
+      toolPayload(await client.callTool({
+        name: 'chatgpt_bind_session',
+        arguments: { session_key: reviewSessionKey, conversation_url: reviewConversationUrl, title: 'GPTTRADDER REVIEW' },
+      }));
+    }
+    return;
+  }
+  toolPayload(await client.callTool({
+    name: 'chatgpt_bind_session',
+    arguments: { session_key: reviewSessionKey, conversation_url: reviewConversationUrl, title: 'GPTTRADDER REVIEW' },
+  }));
+}
+
 function readBody(req, maxBytes = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -99,6 +129,13 @@ function readBody(req, maxBytes = 10 * 1024 * 1024) {
 }
 
 await ensureSession();
+// The review session is best-effort: the bridge still works for trading
+// decisions even when the review conversation is not configured.
+if (reviewConversationUrl) {
+  await ensureReviewSession().catch((error) => {
+    console.error(`Review session setup skipped: ${error.message}`);
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -110,6 +147,48 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       res.writeHead(503);
       res.end(JSON.stringify({ ok: false, error: error.message }));
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/review') {
+    try {
+      if (!reviewConversationUrl) {
+        throw new Error('review channel is not configured (GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL missing)');
+      }
+      const body = JSON.parse(await readBody(req));
+      const eventId = body?.client_message_id;
+      const message = body?.message;
+      const requestedSession = body?.session_key;
+      if (!eventId || typeof message !== 'string' || !message.trim()) {
+        throw new Error('client_message_id and message are required');
+      }
+      if (requestedSession !== reviewSessionKey) {
+        throw new Error(
+          `review messages must use session_key '${reviewSessionKey}' (got '${requestedSession}'); ` +
+            'the trading session can never be used for review messages',
+        );
+      }
+      if (!eventId.startsWith('gpttradder-review:')) {
+        throw new Error(`invalid review client_message_id prefix: ${eventId}`);
+      }
+      const messageSha = sha256Hex(message);
+      const send = toolPayload(await client.callTool({
+        name: 'chatgpt_send',
+        arguments: {
+          session_key: reviewSessionKey,
+          message,
+          message_sha256: messageSha,
+          client_message_id: eventId,
+          timeout_seconds: body?.timeout_seconds ? Number(body.timeout_seconds) : reviewTimeoutSeconds,
+        },
+      }));
+      if (!send?.send_confirmed) throw new Error('ChatGPT review bridge did not confirm message dispatch');
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, send_confirmed: true, event_id: eventId, response: send.text || '' }));
+    } catch (error) {
+      res.writeHead(502);
+      res.end(JSON.stringify({ ok: false, error: error?.message || String(error) }));
     }
     return;
   }

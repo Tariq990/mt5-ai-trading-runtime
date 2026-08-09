@@ -11,6 +11,7 @@ from .decision.base import DecisionProvider
 from .hashing import market_packet_hash
 from .models import Decision, DecisionAction, ExecutionResult, MarketPacket
 from .notifications import NotificationService
+from .review import ReviewService
 from .safety import SafetyEngine
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class TradingOrchestrator:
         safety: SafetyEngine,
         db: Database,
         notifications: NotificationService | None = None,
+        review: ReviewService | None = None,
     ):
         self.broker = broker
         self.collector = collector
@@ -32,6 +34,7 @@ class TradingOrchestrator:
         self.safety = safety
         self.db = db
         self.notifications = notifications
+        self.review = review
         self._cycle_lock = asyncio.Lock()
 
     async def run_cycle(self, trigger: str = "POLL", reason: str | None = None) -> ExecutionResult | None:
@@ -61,6 +64,10 @@ class TradingOrchestrator:
                 severity="ERROR",
                 key="market-collection-failed",
             )
+            if self.review is not None:
+                self.review.fire(
+                    self.review.send_system_error("MARKET_COLLECTION_FAILED", f"{type(exc).__name__}: {exc}")
+                )
             return None
 
         packet.account = self.db.apply_risk_state(packet.account, self.safety.settings.risk_timezone)
@@ -77,6 +84,10 @@ class TradingOrchestrator:
                 severity="WARNING",
                 key=f"cycle-block:{packet_gate.code}",
             )
+            if self.review is not None and packet_gate.code in {"STALE_PACKET", "TIME_INVALID"}:
+                self.review.fire(
+                    self.review.send_system_error(packet_gate.code, packet_gate.reason)
+                )
             return None
 
         try:
@@ -89,6 +100,9 @@ class TradingOrchestrator:
                 severity="ERROR",
                 key="decision-provider-failed",
             )
+            if self.review is not None:
+                code = self._classify_decision_error(exc)
+                self.review.fire(self.review.send_system_error(code, f"{type(exc).__name__}: {exc}"))
             return None
 
         if not self.db.save_decision(decision):
@@ -98,6 +112,10 @@ class TradingOrchestrator:
                 severity="WARNING",
                 key=f"duplicate-decision:{decision.decision_id}",
             )
+            if self.review is not None:
+                self.review.fire(
+                    self.review.send_system_error("IDEMPOTENCY_PROTECTION", f"duplicate decision {decision.decision_id}")
+                )
             return None
 
         # Reserve the decision before any broker side effect. This is the hard
@@ -109,6 +127,10 @@ class TradingOrchestrator:
                 severity="WARNING",
                 key=f"claimed-decision:{decision.decision_id}",
             )
+            if self.review is not None:
+                self.review.fire(
+                    self.review.send_system_error("IDEMPOTENCY_PROTECTION", f"execution already claimed {decision.decision_id}")
+                )
             return None
 
         gate = self.safety.decision_gate(packet, decision)
@@ -125,6 +147,8 @@ class TradingOrchestrator:
             self.db.finalize_execution(result)
             self.db.update_cycle_status(packet.cycle_id, result.status)
             await self._notify_result(packet, decision, result)
+            if self.review is not None:
+                self.review.fire(self.review.scan_closed_trades(packet))
             return result
 
         try:
@@ -193,11 +217,72 @@ class TradingOrchestrator:
                 status="REJECTED",
                 reason=f"BROKER_EXCEPTION: {type(exc).__name__}: {exc}",
             )
+            if self.review is not None:
+                self.review.fire(
+                    self.review.send_system_error("BROKER_EXECUTION_EXCEPTION", f"{type(exc).__name__}: {exc}")
+                )
 
         self.db.finalize_execution(result)
         self.db.update_cycle_status(packet.cycle_id, result.status)
         await self._notify_result(packet, decision, result)
+        if self.review is not None:
+            if result.status == "REJECTED" and decision.decision in {DecisionAction.LONG, DecisionAction.SHORT}:
+                self.review.fire(self.review.send_trade_rejected(self._rejection_record(packet, decision, result)))
+            self.review.fire(self.review.scan_closed_trades(packet))
         return result
+
+    def _classify_decision_error(self, exc: Exception) -> str:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if "challenge" in text:
+            return "CHALLENGE_REQUIRED"
+        if "connect" in text or "connection" in text:
+            return "NETWORK_ERROR"
+        if "timeout" in text:
+            return "BRIDGE_TIMEOUT"
+        return "DECISION_PROVIDER_FAILED"
+
+    def _rejection_record(self, packet: MarketPacket, decision: Decision, result: ExecutionResult) -> dict:
+        symbol = decision.symbol or "?"
+        market_data = packet.symbols.get(symbol)
+        status = packet.symbol_status.get(symbol)
+        metadata = decision.metadata or {}
+        risk = metadata.get("risk_breakdown") or {}
+        record = {
+            "symbol": symbol,
+            "decision_id": str(decision.decision_id),
+            "decision": decision.decision.value,
+            "gate_code": (result.reason or "").split(":")[0],
+            "reason": result.reason,
+            "decision_json": decision.model_dump_json(),
+            "quote": {
+                "bid": market_data.quote.bid if market_data else None,
+                "ask": market_data.quote.ask if market_data else None,
+                "ts": market_data.quote.ts.isoformat() if market_data else None,
+            },
+            "contract": {
+                "volume_min": market_data.contract.volume_min if market_data and market_data.contract else None,
+                "volume_max": market_data.contract.volume_max if market_data and market_data.contract else None,
+                "volume_step": market_data.contract.volume_step if market_data and market_data.contract else None,
+                "trade_tick_size": market_data.contract.trade_tick_size if market_data and market_data.contract else None,
+                "trade_tick_value": market_data.contract.trade_tick_value if market_data and market_data.contract else None,
+                "trade_contract_size": market_data.contract.trade_contract_size if market_data and market_data.contract else None,
+            },
+            "risk_breakdown": {
+                "risk_amount": risk.get("risk_amount"),
+                "estimated_margin": risk.get("estimated_margin"),
+                "requested_volume": risk.get("requested_volume"),
+                "normalized_volume": risk.get("normalized_volume"),
+                "normalization_drift_pct": risk.get("normalization_drift_pct"),
+            },
+        }
+        if status is not None:
+            record["symbol_status"] = {
+                "status": status.status,
+                "executable_now": status.executable_now,
+                "market_session_open": status.market_session_open,
+                "quote_fresh": status.quote_fresh,
+            }
+        return record
 
     async def _finalize_rejection(
         self,
@@ -215,6 +300,10 @@ class TradingOrchestrator:
         self.db.finalize_execution(result)
         self.db.update_cycle_status(decision.cycle_id, code)
         await self._notify_result(packet, decision, result)
+        if self.review is not None:
+            if decision.decision in {DecisionAction.LONG, DecisionAction.SHORT}:
+                self.review.fire(self.review.send_trade_rejected(self._rejection_record(packet, decision, result)))
+            self.review.fire(self.review.scan_closed_trades(packet))
         return result
 
     async def _notify_result(self, packet: MarketPacket, decision: Decision, result: ExecutionResult) -> None:

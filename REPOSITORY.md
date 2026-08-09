@@ -44,6 +44,7 @@ The following has already been achieved and MUST NOT regress:
 - 100 tests passing after the v0.4.0 upgrade (full suite: `python -m pytest -q`).
 - 121 Python tests + 15 node bridge tests passing after the v0.4.0 hardening pass (clock normalization + executable status).
 - 142 Python tests + 18 node bridge tests passing after the Fix 4 (v0.4.0) release-blocking pass — auto-measured broker clock, deterministic bridge messages, live MT5 revalidation all green.
+- 154 Python tests + 18 node bridge tests passing after the Fix 5 (review channel) pass; the review channel was verified live end-to-end against a real ChatGPT conversation.
 - `python -m compileall -q src` passes.
 - End-to-end smoke cycle passes with the simulated broker (`once --mock` -> SKIPPED/WAIT).
 - Preflight passes with the simulated broker: all five canonical symbols resolved
@@ -61,6 +62,10 @@ The following has already been achieved and MUST NOT regress:
 - `GPTTRADDER-Watchdog` task exists or has been tested.
 - `GPTTRADDER-MT5-Terminal` task exists or has been tested.
 - Real ChatGPT/Playwright bridge was tested.
+- The review channel was tested live: separate ChatGPT conversation bound to
+  `gpttradder-review`, TEST event delivered, ChatGPT reply persisted to
+  `review_events` (SENT), duplicate suppression verified, wrong session key
+  rejected, trading session untouched.
 - Three consecutive real ChatGPT decision cycles completed cleanly.
 - ChatGPT returned WAIT decisions normally.
 - No freezing remained after timeout correction.
@@ -209,6 +214,97 @@ retries A, persisted attempts A2, same-cycle divergence B, new-cycle C, cached
 reuse D, transport-retry single execution E) + `tests/test_models.py` (5 new:
 TP coercion/rejection, price-range coercion) + node `digest.test.mjs` (2 new:
 determinism, fixed reference) + `json.test.mjs` (1 new: escaped arrays).
+
+## Fix 5 — Isolated ChatGPT review channel (v0.5.0)
+
+A post-trade/system REVIEW channel that uses a SEPARATE ChatGPT conversation
+(`gpttradder-review` session key), strictly advisory: it analyses closed
+trades, rejected entries, system errors and periodic/daily summaries, and its
+replies are stored for the audit record. It never executes trades, never
+modifies parameters, and its failure NEVER blocks or stalls the trading cycle.
+
+**Session separation (hard invariant):**
+- `bridge/server.mjs` — `POST /review` accepts ONLY the `gpttradder-review`
+  session key; any other key (including the trading `gpttradder` key) is
+  rejected with 502 BEFORE dispatch. The trading session is never used for
+  review messages and is never re-bound by the review channel
+  (`ensureReviewSession` binds only `gpttradder-review`; startup is
+  best-effort so a missing review conversation cannot break trading).
+- Review messages are frozen per event: one canonical serialization + SHA-256,
+  mirroring the Fix 4 decision-bridge idempotency contract.
+- `watchdog.py` passes the review env vars (`GPTTRADDER_CHATGPT_REVIEW_*`) to
+  the auto-started bridge; the trading env vars are untouched.
+
+**Non-blocking by contract:**
+- `orchestrator.py` fires every review event as a BACKGROUND task
+  (`ReviewService.fire`); `send_*`/`scan_*`/`process_pending` swallow all
+  failures internally. A dead review bridge or a 502 can never stall or fail a
+  trading cycle. Verified live: a review send against a stale bridge recorded
+  `FAILED` in the DB while the cycle continued normally.
+
+**Event types:**
+- `TRADE_CLOSED` — durable position-snapshot diff (`review:positions_snapshot`
+  in DB state, survives restarts); enriched with the broker statement deal
+  (ticket/price/profit/comment) when available; R-multiple computed.
+- `TRADE_REJECTED` — every LONG/SHORT that fails the safety gate or broker
+  execution, with quote, contract metadata, symbol status and the monetary
+  risk breakdown attached.
+- `SYSTEM_ERROR` — collection failures, decision-provider failures,
+  cycle-blocked (STALE_PACKET/TIME_INVALID), broker exceptions,
+  idempotency-protection triggers; noisy repeats are aggregated per window
+  (first occurrence + every Nth), never more than one send per window bucket.
+- `PERIODIC_REVIEW` — configurable cadence (default 6h) with cycle/decision/
+  execution/symbol counts, equity/drawdown, open positions, top rejections.
+- `DAILY_REVIEW` — once per local risk-timezone day after
+  `review_daily_hour:minute`, with the day summary plus the last closed trades
+  and rejections; deep-review advisory prompt.
+- `TEST` — `gpttradder review-test` CLI command (end-to-end channel check;
+  no broker connection, no trading side effects).
+
+**Idempotency:** `db.claim_review_event` (INSERT with unique `event_id`,
+`gpttradder-review:` prefix enforced) is the durable at-most-once boundary —
+the same event id can never be delivered twice, even across process restarts
+(verified live and by restart tests).
+
+**Persistence:** `review_events` table (event_id, event_type, status
+CLAIMED/SENT/FAILED, payload_json, response_json, attempts, timestamps);
+`get_review_payloads` feeds the daily review; dashboard/API-friendly
+`get_review_events`.
+
+**Config (`.env.example`):** `GPTTRADDER_REVIEW_ENABLED`,
+`GPTTRADDER_CHATGPT_REVIEW_SESSION_KEY` (default `gpttradder-review`),
+`GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL` (must differ from the trading
+conversation), `GPTTRADDER_CHATGPT_REVIEW_TIMEOUT_SECONDS`,
+`GPTTRADDER_REVIEW_BRIDGE_URL` (default `http://127.0.0.1:8787/review`),
+`GPTTRADDER_REVIEW_RETRY_DELAYS`, `GPTTRADDER_REVIEW_PERIODIC_HOURS`,
+`GPTTRADDER_REVIEW_DAILY_HOUR/MINUTE`, `GPTTRADDER_REVIEW_ERROR_AGGREGATION_WINDOW_SECONDS`,
+`GPTTRADDER_REVIEW_ERROR_AGGREGATE_EVERY`. The `GPTTRADDER_CHATGPT_REVIEW_*`
+env names are declared as pydantic validation aliases on the `review_*`
+Settings fields (`populate_by_name=True` keeps Python-side construction intact).
+
+**Live verification (2026-08-10, real ChatGPT web):**
+- Created a NEW ChatGPT conversation for the review channel (conversation URL
+  kept out of the repo; see `.env`) via the
+  browser MCP `chatgpt_new_session` + first-message capture; the trading
+  conversation was never touched and its binding was verified unchanged via `/health`.
+- `gpttradder review-test` → HTTP 200, `send_confirmed: true`, ChatGPT replied
+  in the review conversation: "OK — I expect trade-review events such as
+  signals, entries/exits, risk checks, strategy decisions, execution outcomes,
+  anomalies, and runtime/contract tests."
+- Response persisted: `review_events` row `status=SENT` with the reply in
+  `response_json`; a pre-fix send attempt against a stale bridge persisted as
+  `FAILED` (audit trail, no crash).
+- Same event id re-dispatched → suppressed (duplicate), exactly one SENT row.
+- `POST /review` with the trading session key → 502
+  "review messages must use session_key 'gpttradder-review'".
+
+**Regression coverage:** `tests/test_review.py` (11 new: disabled-channel
+short-circuit, frozen message + once-only delivery, error aggregation first/Nth
+and fresh-window, closed-trade scanner + durable snapshot, periodic bucket
+once-per-window, daily once-per-local-day, bridge failure recorded without
+raising, process_pending never raises, claim survives restart, no DB pollution
+when disabled) + `tests/test_orchestrator.py` (1 new: rejected entry fires a
+TRADE_REJECTED review event with context).
 
 # CORE ARCHITECTURAL CONTRACT
 

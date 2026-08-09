@@ -67,6 +67,16 @@ CREATE TABLE IF NOT EXISTS bridge_sends (
     attempt INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS review_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    response_json TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    sent_at TEXT
+);
 """
 
 
@@ -129,6 +139,61 @@ class Database:
                 FROM bridge_sends WHERE cycle_id=? ORDER BY id LIMIT ?""",
                 (str(cycle_id), limit),
             ).fetchall()
+        return [dict(row) for row in rows]
+
+    def claim_review_event(self, event_id: str, event_type: str, payload: dict) -> bool:
+        """Atomically reserve a review event id.
+
+        Returns False when the id already exists (the review event was already
+        claimed), which is the durable idempotency boundary: the same stable
+        event id can never be delivered twice, even across process restarts.
+        """
+        if not event_id or not event_id.startswith("gpttradder-review:"):
+            raise ValueError("review event ids must use the gpttradder-review: prefix")
+        try:
+            with self.connect() as conn:
+                conn.execute(
+                    """INSERT INTO review_events(event_id, event_type, status, payload_json)
+                    VALUES (?, ?, 'CLAIMED', ?)""",
+                    (event_id, event_type, json.dumps(payload)),
+                )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def finish_review_event(self, event_id: str, *, status: str, response: str | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE review_events SET status=?, response_json=?, attempts=attempts+1,
+                   sent_at=CURRENT_TIMESTAMP WHERE event_id=?""",
+                (status, json.dumps({"text": response}) if response is not None else None, event_id),
+            )
+
+    def review_event_exists(self, event_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM review_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+        return row is not None
+
+    def review_event_attempts(self, event_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM review_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+        return 0 if row is None else int(row["attempts"])
+
+    def get_review_events(self, limit: int = 100, event_type: str | None = None) -> list[dict]:
+        limit = max(1, min(500, int(limit)))
+        sql = "SELECT event_id, event_type, status, attempts, created_at, sent_at FROM review_events"
+        params: list = []
+        if event_type:
+            sql += " WHERE event_type=?"
+            params.append(event_type)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
     def save_decision(self, decision: Decision) -> bool:
@@ -444,7 +509,48 @@ class Database:
 
         selected_decisions = [row for row in decisions if str(row["cycle_id"]) in cycle_ids]
         selected_executions = [row for row in executions if str(row["cycle_id"]) in cycle_ids]
+        return self._summarize(selected_cycles, selected_decisions, selected_executions)
 
+    def get_since_summary(self, since_iso: str, timezone_name: str) -> dict:
+        """Window-based summary (cycles created at/after `since_iso`, UTC ISO)."""
+        with self.connect() as conn:
+            cycles = conn.execute(
+                """SELECT cycle_id,created_at,status,packet_json FROM cycles
+                   WHERE created_at >= ? ORDER BY created_at, rowid""",
+                (since_iso,),
+            ).fetchall()
+            decisions = conn.execute(
+                "SELECT decision_id,cycle_id,decision,symbol,payload_json FROM decisions ORDER BY rowid"
+            ).fetchall()
+            executions = conn.execute(
+                "SELECT decision_id,cycle_id,status,payload_json FROM executions ORDER BY id"
+            ).fetchall()
+
+        cycle_ids = {str(row["cycle_id"]) for row in cycles}
+        selected_cycles = [(row, json.loads(row["packet_json"])) for row in cycles]
+        selected_decisions = [row for row in decisions if str(row["cycle_id"]) in cycle_ids]
+        selected_executions = [row for row in executions if str(row["cycle_id"]) in cycle_ids]
+        return self._summarize(selected_cycles, selected_decisions, selected_executions)
+
+    def get_review_payloads(self, event_type: str, since_iso: str | None = None, limit: int = 500) -> list[dict]:
+        limit = max(1, min(2000, int(limit)))
+        sql = "SELECT event_id, payload_json FROM review_events WHERE event_type=?"
+        params: list = [event_type]
+        if since_iso:
+            sql += " AND created_at >= ?"
+            params.append(since_iso)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    @staticmethod
+    def _summarize(
+        selected_cycles: list[tuple],
+        selected_decisions: list,
+        selected_executions: list,
+    ) -> dict:
         decision_counts: dict[str, int] = {}
         symbol_counts: dict[str, int] = {}
         for row in selected_decisions:
@@ -473,7 +579,6 @@ class Database:
             rejection_reasons.items(), key=lambda item: (-item[1], item[0])
         )
         return {
-            "day": day,
             "cycles": len(selected_cycles),
             "decisions": len(selected_decisions),
             "decision_counts": decision_counts,

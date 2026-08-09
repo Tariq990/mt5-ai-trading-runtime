@@ -113,6 +113,11 @@ class RuntimeWatchdog:
             env.setdefault("GPTTRADDER_CHATGPT_CONVERSATION_URL", self.settings.chatgpt_conversation_url)
         env.setdefault("GPTTRADDER_CHATGPT_TIMEOUT_SECONDS", str(self.settings.chatgpt_timeout_seconds))
         env.setdefault("CHATGPT_HEADLESS", "true" if self.settings.chatgpt_headless else "false")
+        if self.settings.review_enabled:
+            env.setdefault("GPTTRADDER_CHATGPT_REVIEW_SESSION_KEY", self.settings.review_session_key)
+            if self.settings.review_conversation_url:
+                env.setdefault("GPTTRADDER_CHATGPT_REVIEW_CONVERSATION_URL", self.settings.review_conversation_url)
+            env.setdefault("GPTTRADDER_CHATGPT_REVIEW_TIMEOUT_SECONDS", str(self.settings.review_timeout_seconds))
         self.bridge = subprocess.Popen(
             [node, str(bridge_script)],
             cwd=bridge_dir,
