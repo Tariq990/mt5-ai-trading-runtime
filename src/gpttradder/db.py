@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS bridge_sends (
     client_message_id TEXT NOT NULL,
     message_sha256 TEXT NOT NULL,
     attempt INTEGER NOT NULL,
+    dispatch_state TEXT,
+    error_code TEXT,
+    outcome TEXT,
+    response_found INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS review_events (
@@ -86,6 +90,21 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn) -> None:
+        """Idempotent ALTER TABLE additions for databases created before a schema change."""
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(bridge_sends)").fetchall()}
+        additions = {
+            "dispatch_state": "TEXT",
+            "error_code": "TEXT",
+            "outcome": "TEXT",
+            "response_found": "INTEGER",
+        }
+        for column, ddl in additions.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE bridge_sends ADD COLUMN {column} {ddl}")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -123,19 +142,35 @@ class Database:
         client_message_id: str,
         message_sha256: str,
         attempt: int,
+        dispatch_state: str | None = None,
+        error_code: str | None = None,
+        outcome: str | None = None,
+        response_found: bool | None = None,
     ) -> None:
         """Persist one ChatGPT bridge send attempt (idempotency audit trail)."""
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO bridge_sends(cycle_id, client_message_id, message_sha256, attempt)
-                VALUES (?, ?, ?, ?)""",
-                (str(cycle_id), client_message_id, message_sha256, int(attempt)),
+                """INSERT INTO bridge_sends
+                (cycle_id, client_message_id, message_sha256, attempt,
+                 dispatch_state, error_code, outcome, response_found)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(cycle_id),
+                    client_message_id,
+                    message_sha256,
+                    int(attempt),
+                    dispatch_state,
+                    error_code,
+                    outcome,
+                    int(response_found) if response_found is not None else None,
+                ),
             )
 
     def get_bridge_sends(self, cycle_id: str, limit: int = 100) -> list[dict]:
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT cycle_id, client_message_id, message_sha256, attempt, created_at
+                """SELECT cycle_id, client_message_id, message_sha256, attempt,
+                dispatch_state, error_code, outcome, response_found, created_at
                 FROM bridge_sends WHERE cycle_id=? ORDER BY id LIMIT ?""",
                 (str(cycle_id), limit),
             ).fetchall()

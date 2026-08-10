@@ -306,6 +306,73 @@ raising, process_pending never raises, claim survives restart, no DB pollution
 when disabled) + `tests/test_orchestrator.py` (1 new: rejected entry fires a
 TRADE_REJECTED review event with context).
 
+## Fix 6 — Explicit bridge dispatch states + reconciliation (v0.5.1)
+
+**Observed failure (2026-08-10, live):** `DECISION_PROVIDER_FAILED` twice
+within ~8 minutes, each with `HTTP 502 {"error":"ChatGPT bridge did not
+confirm message dispatch"}`, and at least one cycle completing with 0
+decisions.
+
+**Root cause (proven from the MCP durable store):** all three affected cycles
+have MCP turn status `failed_before_send` / `error_code=unexpected_error` —
+a Playwright `locator.fill` actionability timeout on the `#prompt-textarea`
+composer (`context.setDefaultTimeout(15_000)`). The durable turn rows carry
+NO dispatch evidence (`send_dispatch_intent_at`/`send_dispatched_at` are
+NULL), so the message was **never dispatched** in every observed failure. The
+failure mode is therefore FAILED_BEFORE_DISPATCH (safe to retry), NOT
+lost-acknowledgement. The bridge however reported every non-confirmation as
+the same generic error, and the runtime's "identical body twice → fail fast"
+heuristic abandoned the cycle after 2 attempts despite the failure being
+pre-dispatch and retryable (evidence: cycle `9bea802c` succeeded on its
+second attempt minutes later).
+
+**Fail-closed verified for both failed cycles:** status `DECISION_FAILED`,
+zero execution rows, zero decisions stored, no orphan pending orders, no
+reused decision response — the at-most-once and execution boundaries held.
+
+**Fix — explicit dispatch states (canonical vocabulary):**
+`NOT_DISPATCHED`-style outcomes are now classified by the bridge into
+`FAILED_BEFORE_DISPATCH` (durable proof nothing reached the browser; safe to
+re-send the same frozen payload), `DISPATCHED_UNCONFIRMED` (durable dispatch
+evidence exists; NEVER send again — bounded reconciliation only),
+`DISPATCHED_CONFIRMED` (backend confirmed; reply pending),
+`RESPONSE_RECEIVED` (reply proven) and `NOT_FOUND` (cannot prove either way;
+fail closed). `bridge/dispatch-state.mjs` is the pure, unit-tested classifier;
+`bridge/server.mjs` returns it in every non-200 body together with
+`retryable`, `status`, `error_code`, `cycle_id`, `client_message_id`,
+`message_sha256`, `found_in_conversation` and `response_found`.
+
+**Reconciliation behavior:** the runtime never re-dispatches an unconfirmed
+turn (the MCP itself refuses: same `client_message_id` returns the stored
+turn). It re-POSTs the byte-identical frozen payload on
+`GPTTRADDER_DECISION_RECONCILE_INTERVAL_SECONDS` (default 20s) — a cached
+read that returns the reply the moment the turn completes — within a bounded
+budget (`decision_timeout_seconds` + one interval). If the reply cannot be
+proven, the cycle fails closed with a full audit. `FAILED_BEFORE_DISPATCH`
+failures (the observed mode) retry through the full retry-delay list instead
+of failing fast, which fixes the actual outage without ever risking a
+duplicate ChatGPT turn (frozen payload + MCP write-once evidence both
+guarantee at-most-once dispatch).
+
+**Audit:** `bridge_sends` gains `dispatch_state`, `error_code`, `outcome`,
+`response_found` (idempotent ALTER migration for existing DBs); every failed
+decision-provider review event now reports `cycle_id`, `client_message_id`,
+`message_sha256`, `dispatch_state`, `send_attempt`,
+`found_in_conversation`, `response_found` and `reconcile_outcome` — no
+secrets, no browser state. Error codes are state-aware
+(`BRIDGE_FAILED_BEFORE_DISPATCH`, `BRIDGE_DISPATCH_UNCONFIRMED`,
+`BRIDGE_RESPONSE_INVALID`, `BRIDGE_STATE_UNKNOWN`).
+
+**Regression coverage:** `bridge/dispatch-state.test.mjs` (9) +
+`tests/test_http_bridge.py` (11, incl. unconfirmed-then-response,
+bridge-restart-during-reconciliation, byte-identical frozen payloads across
+attempts, bounded fail-closed, legacy-body handling) + updated
+`tests/test_bridge_idempotency.py` + `tests/test_orchestrator.py` (1:
+provider failure is fail-closed with full audit in the SYSTEM_ERROR review
+event) + `tests/test_review.py` (2: audit carried in message + payload, and
+backward compatibility). Full suite: 163 Python + 27 Node tests, compileall,
+`node --check` on both `server.mjs` copies.
+
 # CORE ARCHITECTURAL CONTRACT
 
 GPTTRADDER is DEMO ONLY.

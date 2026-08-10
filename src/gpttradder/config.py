@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     decision_bridge_url: str = "http://127.0.0.1:8787/decision"
     decision_timeout_seconds: int = Field(default=90, ge=5, le=300)
     decision_retry_delays: list[int] = Field(default_factory=lambda: [0, 15, 30, 60])
+    # Polling interval for DISPATCHED_UNCONFIRMED reconciliation: the same
+    # frozen payload is re-POSTed (the bridge/MCP dedup returns the stored
+    # turn, never a second ChatGPT message) until the reply appears or the
+    # bounded decision budget is exhausted (fail closed).
+    decision_reconcile_interval_seconds: int = Field(default=20, ge=5, le=120)
 
     # Post-trade/system review channel: a SEPARATE ChatGPT session
     # (gpttradder-review) that ONLY analyses and advises. It never executes

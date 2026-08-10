@@ -158,6 +158,59 @@ async def test_system_error_aggregation_sends_first_and_nth(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_system_error_carries_dispatch_audit(tmp_path) -> None:
+    """Decision-provider failures must report the full dispatch audit trail
+    (cycle_id, client_message_id, sha, dispatch_state, attempt, flags and
+    reconciliation outcome) in both the message and the durable payload."""
+    calls = []
+    settings = _settings()
+    db = _db(tmp_path)
+    service = _service(settings, db, _ok_handler(calls))
+    audit = {
+        "cycle_id": "cycle-9",
+        "client_message_id": "gpttradder:cycle-9",
+        "message_sha256": "deadbeef",
+        "send_attempt": 4,
+        "dispatch_state": "FAILED_BEFORE_DISPATCH",
+        "found_in_conversation": False,
+        "response_found": False,
+        "reconcile_outcome": "UNRESOLVED",
+    }
+    result = await service.send_system_error("BRIDGE_FAILED_BEFORE_DISPATCH", "fill timeout", audit=audit)
+    assert result is not None
+
+    assert len(calls) == 1
+    body = calls[0]
+    assert "cycle_id=cycle-9" in body["message"]
+    assert "client_message_id=gpttradder:cycle-9" in body["message"]
+    assert "message_sha256=deadbeef" in body["message"]
+    assert "dispatch_state=FAILED_BEFORE_DISPATCH" in body["message"]
+    assert "send_attempt=4" in body["message"]
+    assert "found_in_conversation=False" in body["message"]
+    assert "reconcile_outcome=UNRESOLVED" in body["message"]
+
+    rows = db.get_review_events(event_type="SYSTEM_ERROR")
+    assert len(rows) == 1
+    with db.connect() as conn:
+        payload = json.loads(conn.execute(
+            "SELECT payload_json FROM review_events WHERE event_id=?", (rows[0]["event_id"],)
+        ).fetchone()["payload_json"])
+    assert payload["code"] == "BRIDGE_FAILED_BEFORE_DISPATCH"
+    assert payload["audit"] == audit
+
+
+@pytest.mark.asyncio
+async def test_system_error_without_audit_stays_compatible(tmp_path) -> None:
+    calls = []
+    settings = _settings()
+    service = _service(settings, _db(tmp_path), _ok_handler(calls))
+    result = await service.send_system_error("STALE_PACKET", "detail")
+    assert result is not None
+    assert len(calls) == 1
+    assert "Dispatch audit:" not in calls[0]["message"]
+
+
+@pytest.mark.asyncio
 async def test_error_aggregation_never_skips_a_fresh_window(tmp_path) -> None:
     calls = []
     settings = _settings(review_error_aggregation_window_seconds=60, review_error_aggregate_every=2)

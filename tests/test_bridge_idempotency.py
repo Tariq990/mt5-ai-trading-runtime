@@ -83,9 +83,16 @@ async def test_a_same_cycle_retries_are_byte_identical_and_single_id():
         attempts.append(body_of(request))
         seen_bodies.add(bytes(request.content))
         if len(attempts) < 3:
-            # transient, DIFFERENT errors each time (a deterministic repeated
-            # error legitimately fails fast by design)
-            return httpx.Response(502, request=request, json={"error": f"transient hiccup #{len(attempts)}"})
+            # transient pre-dispatch failures (proven nothing was sent) are
+            # safely retried with the byte-identical frozen payload
+            return httpx.Response(
+                502, request=request,
+                json={
+                    "error": f"transient hiccup #{len(attempts)}",
+                    "dispatch_state": "FAILED_BEFORE_DISPATCH",
+                    "retryable": True,
+                },
+            )
         return httpx.Response(200, request=request, json=wait_decision(packet).model_dump(mode="json"))
 
     bridge = bridge_with_transport(handler)
@@ -98,21 +105,37 @@ async def test_a_same_cycle_retries_are_byte_identical_and_single_id():
 
 
 async def test_a2_on_send_records_sha_and_attempt_for_every_retry():
+    from gpttradder.decision.http_bridge import DecisionBridgeError
+
     packet = make_packet()
     records = []
 
-    async def handler(request):
-        return httpx.Response(502, request=request, json={"error": f"transient #{len(records) + 1}"})
-
-    try:
-        await bridge_with_transport(handler, on_send=lambda **kw: records.append(kw)).decide(packet)
-    except RuntimeError:
-        pass
-    assert [r["attempt"] for r in records] == [1, 2, 3]
+    settings = Settings(
+        chatgpt_timeout_seconds=15,
+        decision_timeout_seconds=16,
+        decision_reconcile_interval_seconds=5,
+        decision_retry_delays=[0, 0, 0],
+    )
+    settings._bridge_transport = httpx.MockTransport(lambda request: httpx.Response(
+        502, request=request,
+        json={
+            "error": f"transient #{len(records) + 1}",
+            "dispatch_state": "FAILED_BEFORE_DISPATCH",
+            "retryable": True,
+        },
+    ))
+    bridge = HTTPDecisionBridge(settings, on_send=lambda **kw: records.append(kw))
+    with pytest.raises(DecisionBridgeError):
+        await bridge.decide(packet)
+    attempts = [r["attempt"] for r in records]
+    assert attempts == list(range(1, len(attempts) + 1)), "attempts are consecutive"
+    assert len(attempts) >= 3, "pre-dispatch failures are retried, not abandoned after 2"
     shas = {r["message_sha256"] for r in records}
     assert len(shas) == 1, "one frozen sha per cycle, across all attempts"
     ids = {r["client_message_id"] for r in records}
     assert ids == {f"gpttradder:{packet.cycle_id}"}
+    states = {r["dispatch_state"] for r in records}
+    assert states == {"FAILED_BEFORE_DISPATCH"}
 
 
 async def test_b_same_cycle_with_altered_content_fails_closed():
@@ -187,7 +210,10 @@ async def test_e_transport_retries_cannot_duplicate_execution():
         cycle_id = body["market_packet"]["cycle_id"]
         attempts.append(1)
         if len(attempts) < 2:
-            return httpx.Response(502, request=request, json={"error": "flaky transport"})
+            return httpx.Response(
+                502, request=request,
+                json={"error": "flaky transport", "dispatch_state": "FAILED_BEFORE_DISPATCH", "retryable": True},
+            )
         decision = Decision(
             cycle_id=cycle_id,
             decision=DecisionAction.WAIT,

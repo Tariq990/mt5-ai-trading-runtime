@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMcpSdk } from './sdk-loader.mjs';
 import { extractJson } from './json.mjs';
 import { buildDecisionMessage } from './digest.mjs';
+import { classifySendResult, DISPATCH_STATE_RESPONSE_RECEIVED, DISPATCH_STATE_FAILED_BEFORE_DISPATCH } from './dispatch-state.mjs';
 
 function sha256Hex(text) {
   return createHash('sha256').update(text).digest('hex');
@@ -183,9 +184,14 @@ const server = http.createServer(async (req, res) => {
           timeout_seconds: body?.timeout_seconds ? Number(body.timeout_seconds) : reviewTimeoutSeconds,
         },
       }));
-      if (!send?.send_confirmed) throw new Error('ChatGPT review bridge did not confirm message dispatch');
+      const classified = classifySendResult(send);
+      if (classified.dispatch_state !== DISPATCH_STATE_RESPONSE_RECEIVED) {
+        throw new Error(
+          `ChatGPT review bridge: ${classified.status || 'no result'} (${classified.error_code || 'no error code'})`,
+        );
+      }
       res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, send_confirmed: true, event_id: eventId, response: send.text || '' }));
+      res.end(JSON.stringify({ ok: true, send_confirmed: true, event_id: eventId, response: classified.response_text }));
     } catch (error) {
       res.writeHead(502);
       res.end(JSON.stringify({ ok: false, error: error?.message || String(error) }));
@@ -216,23 +222,69 @@ const server = http.createServer(async (req, res) => {
     }
     renderedShas.set(cycleId, messageSha);
     if (renderedShas.size > 10000) renderedShas.clear();
-    const send = toolPayload(await client.callTool({
-      name: 'chatgpt_send',
-      arguments: {
-        session_key: sessionKey,
-        message,
-        message_sha256: messageSha,
+
+    let send;
+    try {
+      send = toolPayload(await client.callTool({
+        name: 'chatgpt_send',
+        arguments: {
+          session_key: sessionKey,
+          message,
+          message_sha256: messageSha,
+          client_message_id: `gpttradder:${cycleId}`,
+          timeout_seconds: timeoutSeconds,
+        },
+      }));
+    } catch (error) {
+      // MCP call failed before returning a turn. Nothing was dispatched by
+      // THIS call; a retry with the same client_message_id is safe because
+      // the MCP's durable dedup never re-dispatches a turn that already has
+      // dispatch evidence. The runtime decides from the structured state.
+      res.writeHead(502);
+      res.end(JSON.stringify({
+        ok: false,
+        error: error?.message || String(error),
+        dispatch_state: DISPATCH_STATE_FAILED_BEFORE_DISPATCH,
+        retryable: true,
+        status: null,
+        error_code: 'mcp_call_failed',
+        cycle_id: cycleId,
         client_message_id: `gpttradder:${cycleId}`,
-        timeout_seconds: timeoutSeconds,
-      },
-    }));
-    if (!send?.send_confirmed) throw new Error('ChatGPT bridge did not confirm message dispatch');
-    const decision = extractJson(send.text);
-    if (String(decision.cycle_id) !== String(cycleId)) {
-      throw new Error(`Decision cycle_id mismatch: expected ${cycleId}, received ${decision.cycle_id}`);
+        message_sha256: messageSha,
+        found_in_conversation: false,
+        response_found: false,
+      }));
+      return;
     }
-    res.writeHead(200);
-    res.end(JSON.stringify(decision));
+
+    const classified = classifySendResult(send);
+    if (classified.dispatch_state === DISPATCH_STATE_RESPONSE_RECEIVED) {
+      const decision = extractJson(classified.response_text);
+      if (String(decision.cycle_id) !== String(cycleId)) {
+        throw new Error(`Decision cycle_id mismatch: expected ${cycleId}, received ${decision.cycle_id}`);
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify(decision));
+      return;
+    }
+
+    // Anything else: report the canonical dispatch state so the runtime can
+    // decide between safe retry (nothing dispatched), bounded reconciliation
+    // (dispatched, reply pending) and fail-closed (cannot prove either way).
+    res.writeHead(502);
+    res.end(JSON.stringify({
+      ok: false,
+      error: `ChatGPT bridge: ${classified.status || 'no result'} (${classified.error_code || 'no error code'})`,
+      dispatch_state: classified.dispatch_state,
+      retryable: classified.retryable,
+      status: classified.status,
+      error_code: classified.error_code,
+      cycle_id: cycleId,
+      client_message_id: `gpttradder:${cycleId}`,
+      message_sha256: messageSha,
+      found_in_conversation: classified.found_in_conversation,
+      response_found: classified.response_found,
+    }));
   } catch (error) {
     res.writeHead(502);
     res.end(JSON.stringify({ error: error?.message || String(error) }));

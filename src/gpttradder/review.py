@@ -146,9 +146,20 @@ class ReviewService:
         message = self._trade_rejected_message(record)
         return await self._dispatch(event_id, EVENT_TRADE_REJECTED, record, message)
 
-    async def send_system_error(self, code: str, detail: str, *, now: float | None = None) -> dict | None:
+    async def send_system_error(
+        self,
+        code: str,
+        detail: str,
+        *,
+        now: float | None = None,
+        audit: dict | None = None,
+    ) -> dict | None:
         """Aggregate noisy repeated errors: one send per aggregation window,
-        plus one aggregated summary every ``aggregate_every`` occurrences."""
+        plus one aggregated summary every ``aggregate_every`` occurrences.
+
+        ``audit`` (dispatch audit trail for decision-provider failures) is
+        included in the payload and message; it never contains secrets.
+        """
         now = now if now is not None else time.time()
         window = int(self.settings.review_error_aggregation_window_seconds)
         bucket = int(now) // window
@@ -160,12 +171,20 @@ class ReviewService:
             if count % int(self.settings.review_error_aggregate_every) != 0:
                 return None
             event_id = f"{REVIEW_PREFIX}:error:{code}:{bucket}:{count}"
-            message = self._system_error_message(code, detail, count=count, first_ts=state.get("first_ts", now), last_ts=now)
-            return await self._dispatch(event_id, EVENT_SYSTEM_ERROR, {"code": code, "count": count}, message)
+            message = self._system_error_message(
+                code, detail, count=count, first_ts=state.get("first_ts", now), last_ts=now, audit=audit
+            )
+            payload = {"code": code, "count": count}
+            if audit:
+                payload["audit"] = audit
+            return await self._dispatch(event_id, EVENT_SYSTEM_ERROR, payload, message)
         self.db.set_state(state_key, {"window": bucket, "count": 1, "first_ts": now, "last_ts": now})
         event_id = f"{REVIEW_PREFIX}:error:{code}:{bucket}:1"
-        message = self._system_error_message(code, detail, count=1, first_ts=now, last_ts=now)
-        return await self._dispatch(event_id, EVENT_SYSTEM_ERROR, {"code": code, "count": 1}, message)
+        message = self._system_error_message(code, detail, count=1, first_ts=now, last_ts=now, audit=audit)
+        payload = {"code": code, "count": 1}
+        if audit:
+            payload["audit"] = audit
+        return await self._dispatch(event_id, EVENT_SYSTEM_ERROR, payload, message)
 
     async def maybe_periodic(self, now: datetime | None = None) -> dict | None:
         now = now or utc_now()
@@ -357,7 +376,16 @@ class ReviewService:
             lines.append(f"Decision JSON: {decision_json}")
         return "\n".join(lines)
 
-    def _system_error_message(self, code: str, detail: str, *, count: int, first_ts: float, last_ts: float) -> str:
+    def _system_error_message(
+        self,
+        code: str,
+        detail: str,
+        *,
+        count: int,
+        first_ts: float,
+        last_ts: float,
+        audit: dict | None = None,
+    ) -> str:
         lines = self._header(EVENT_SYSTEM_ERROR)
         lines += [
             f"Error code: {code}",
@@ -366,6 +394,14 @@ class ReviewService:
             f"Last: {datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}",
             f"Detail: {detail[:500]}",
         ]
+        if audit:
+            fields = []
+            for key in ("cycle_id", "client_message_id", "message_sha256", "dispatch_state", "send_attempt", "found_in_conversation", "response_found", "reconcile_outcome"):
+                value = audit.get(key)
+                if value is not None:
+                    fields.append(f"{key}={value}")
+            if fields:
+                lines.append("Dispatch audit: " + " | ".join(fields))
         return "\n".join(lines)
 
     def _periodic_message(self, summary: dict, since: str) -> str:

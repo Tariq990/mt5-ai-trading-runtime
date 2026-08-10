@@ -102,7 +102,14 @@ class TradingOrchestrator:
             )
             if self.review is not None:
                 code = self._classify_decision_error(exc)
-                self.review.fire(self.review.send_system_error(code, f"{type(exc).__name__}: {exc}"))
+                audit = getattr(exc, "audit", None) or None
+                self.review.fire(
+                    self.review.send_system_error(
+                        code,
+                        f"{type(exc).__name__}: {exc}",
+                        audit=audit,
+                    )
+                )
             return None
 
         if not self.db.save_decision(decision):
@@ -232,6 +239,16 @@ class TradingOrchestrator:
         return result
 
     def _classify_decision_error(self, exc: Exception) -> str:
+        audit = getattr(exc, "audit", None) or {}
+        state = audit.get("dispatch_state")
+        if state == "FAILED_BEFORE_DISPATCH":
+            return "BRIDGE_FAILED_BEFORE_DISPATCH"
+        if state in {"DISPATCHED_UNCONFIRMED", "DISPATCHED_CONFIRMED"}:
+            return "BRIDGE_DISPATCH_UNCONFIRMED"
+        if state == "RESPONSE_RECEIVED":
+            return "BRIDGE_RESPONSE_INVALID"
+        if state == "NOT_FOUND":
+            return "BRIDGE_STATE_UNKNOWN"
         text = f"{type(exc).__name__}: {exc}".lower()
         if "challenge" in text:
             return "CHALLENGE_REQUIRED"
