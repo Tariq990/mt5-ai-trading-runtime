@@ -9,7 +9,7 @@ Zero-touch **DEMO-only** BTC/XAU trading automation with ChatGPT as the sole tra
 - **Deterministic code:** broker data, validation, hard risk limits, idempotency, execution, retries, event detection, logging, watchdog, reports and dashboard.
 - **MT5:** execution source of truth. Real-account trading is hard-blocked.
 
-## Included in 0.3.0
+## Included in 0.4.0
 
 ### Trading/runtime
 - BTC + XAU monitored together.

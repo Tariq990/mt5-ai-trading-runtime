@@ -7,6 +7,8 @@ from gpttradder.config import Settings
 from gpttradder.models import AccountState, Candle, Quote, SymbolContractSpec, SymbolMarketData
 from gpttradder.symbols import resolve_canonical_symbols
 
+TEST_MARKET_TIME = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+
 
 class FakeBroker:
     def __init__(self, quotes, account=None, contracts=None):
@@ -67,7 +69,7 @@ class FakeBroker:
 
 
 async def test_collector_skips_symbol_with_zero_quote():
-    now = datetime.now(timezone.utc)
+    now = TEST_MARKET_TIME
     broker = FakeBroker(
         {
             "BTCUSD": Quote(bid=0, ask=0, spread=0, ts=now),
@@ -75,7 +77,7 @@ async def test_collector_skips_symbol_with_zero_quote():
         }
     )
     settings = Settings(symbols=["BTC", "XAU"])
-    packet = await MarketCollector(broker, settings).collect()
+    packet = await MarketCollector(broker, settings, now_fn=lambda: TEST_MARKET_TIME).collect()
     assert list(packet.symbols.keys()) == ["XAU"]
     assert packet.symbol_status["XAU"].status == "TRADABLE"
     assert packet.symbol_status["BTC"].status == "NO_QUOTE"
@@ -148,7 +150,7 @@ def full_contract(broker_symbol, canonical):
 
 
 def five_quotes():
-    now = datetime.now(timezone.utc)
+    now = TEST_MARKET_TIME
     names = ["BTCUSD", "ETHUSD", "XAUUSD", "EURUSD", "GBPUSD"]
     return {name: Quote(bid=1_000 * (i + 1), ask=1_000 * (i + 1) + 10, spread=10, ts=now) for i, name in enumerate(names)}
 
@@ -163,7 +165,7 @@ async def test_collector_builds_packet_with_all_five_instruments():
         "GBPUSD": full_contract("GBPUSD", "GBPUSD"),
     }
     broker = FakeBroker(quotes, contracts=contracts)
-    packet = await MarketCollector(broker, Settings()).collect()
+    packet = await MarketCollector(broker, Settings(), now_fn=lambda: TEST_MARKET_TIME).collect()
     assert list(packet.symbols.keys()) == ["BTC", "ETH", "XAU", "EURUSD", "GBPUSD"]
     assert all(packet.symbol_status[s].status == "TRADABLE" for s in packet.symbols)
     assert packet.symbols["BTC"].contract is not None

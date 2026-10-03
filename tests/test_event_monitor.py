@@ -42,11 +42,11 @@ async def test_simultaneous_events_across_two_symbols_are_all_delivered(tmp_path
     monitor = MarketEventMonitor(broker, orchestrator, settings)
     await monitor.scan_once()
     broker.prices["BTCUSD"] = broker.prices["BTCUSD"] * 1.01
-    broker.prices["XAUUSD"] = broker.prices["XAUUSD"] * 1.01
+    broker.prices["ETHUSD"] = broker.prices["ETHUSD"] * 1.01
     await monitor.scan_once()
     moved = {
         reason.split(":")[1]
         for _, reason in orchestrator.calls
         if reason.startswith("PRICE_MOVE:")
     }
-    assert {"BTC", "XAU"} <= moved
+    assert {"BTC", "ETH"} <= moved

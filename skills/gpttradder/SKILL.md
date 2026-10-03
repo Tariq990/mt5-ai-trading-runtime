@@ -23,7 +23,7 @@ Use this skill whenever a task involves:
 - NEVER ENABLE REAL TRADING. `Settings.allow_real_trading` is validator-blocked; `MT5DemoBroker.assert_demo()` rejects real accounts with `REAL ACCOUNT BLOCKED`. Real-money support is NOT authorized, period.
 - ChatGPT remains the sole trading decision owner. Automation (and you) only transports packets/executions. Never invent, modify, or "improve" trading values in code paths — the pipeline is written to reject silent edits (see NORMALIZATION_DRIFT).
 - Broker data is execution truth. External web data is context only.
-- Repo root: `C:\Users\tarik\Desktop\GPTTRADDER-0.3.0`. Read `AGENTS.md` and `REPOSITORY.md` before changing anything.
+- Repo root: `<repo-root>`. Read `AGENTS.md` and `REPOSITORY.md` before changing anything.
 
 ## Diagnose runtime failures
 

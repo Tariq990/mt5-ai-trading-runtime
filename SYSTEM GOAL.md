@@ -1,6 +1,6 @@
 You are the implementation and operations agent for the local project:
 
-C:\Users\tarik\Desktop\GPTTRADDER-0.3.0
+<repo-root>
 
 Your task is to take full ownership of configuring, testing, debugging, and launching GPTTRADDER on this Windows machine.
 
@@ -40,7 +40,7 @@ Important ownership rules:
 
 Project directory:
 
-C:\Users\tarik\Desktop\GPTTRADDER-0.3.0
+<repo-root>
 
 A Python virtual environment has already been created:
 
@@ -81,7 +81,7 @@ Do not assume these are the only two.
 
 1. Enter:
 
-C:\Users\tarik\Desktop\GPTTRADDER-0.3.0
+<repo-root>
 
 2. Use the existing:
 
@@ -156,10 +156,10 @@ Find its LOCAL Windows directory automatically if possible.
 
 Search likely locations such as:
 
-C:\Users\tarik\Desktop
-C:\Users\tarik\Documents
-C:\Users\tarik\Projects
-C:\Users\tarik
+<user-home>\Desktop
+<user-home>\Documents
+<user-home>\Projects
+<user-home>
 and existing development directories.
 
 Do NOT modify or destroy the working browser profile/cookies/session.

@@ -16,7 +16,7 @@ from gpttradder.safety import SafetyEngine
 
 
 async def create_wait_cycle(tmp_path):
-    settings = Settings(db_path=tmp_path / "report.sqlite3", telegram_enabled=False)
+    settings = Settings(db_path=tmp_path / "report.sqlite3", telegram_enabled=False, symbols=["BTC", "ETH"])
     broker = SimulatedBroker()
     db = Database(settings.db_path)
     orchestrator = TradingOrchestrator(
@@ -40,7 +40,7 @@ async def test_daily_report_uses_durable_decisions_and_is_idempotent(tmp_path):
     assert "WAIT: 1" in report.text
     assert "Market state:" in report.text
     assert "- BTC (BTCUSD): TRADABLE" in report.text
-    assert "- XAU (XAUUSD): TRADABLE" in report.text
+    assert "- ETH (ETHUSD): TRADABLE" in report.text
 
     class FakeNotifier:
         def __init__(self):
