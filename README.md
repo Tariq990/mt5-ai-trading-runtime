@@ -164,6 +164,25 @@ docs/                  supporting documentation
 REPOSITORY.md           detailed engineering history and design record
 ```
 
+## Getting started
+
+### Prerequisites
+
+- Git
+- Python 3.11 or newer
+- Windows PowerShell for the commands below
+- MetaTrader 5 only if you want to use the demo-broker integration
+- Node.js only if you want to run or verify the optional browser decision bridge
+
+Clone the repository:
+
+```powershell
+git clone https://github.com/Tariq990/mt5-ai-trading-runtime.git
+cd mt5-ai-trading-runtime
+```
+
+For the fastest local evaluation, start with the simulated broker. It does not require MetaTrader credentials or broker writes.
+
 ## Quick start: simulated mode
 
 Windows PowerShell:
