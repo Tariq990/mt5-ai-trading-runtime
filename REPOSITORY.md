@@ -12,11 +12,11 @@ Your job is to upgrade the current working system, test everything, create durab
 
 GitHub:
 
-https://github.com/Tariq990/GPTTRADDER
+https://github.com/Tariq990/mt5-ai-trading-runtime
 
 Target repository:
 
-Tariq990/GPTTRADDER
+Tariq990/mt5-ai-trading-runtime
 
 The currently working local project is GPTTRADDER 0.3.0 or newer.
 
@@ -1423,7 +1423,7 @@ Do not remove legitimate source files.
 
 The user explicitly authorizes publishing the latest tested version to:
 
-`Tariq990/GPTTRADDER`
+`Tariq990/mt5-ai-trading-runtime`
 
 GitHub currently may contain an older version than the local working system.
 
@@ -1496,7 +1496,7 @@ Verify the actual remote repository.
 Report:
 
 REMOTE REPOSITORY:
-Tariq990/GPTTRADDER
+Tariq990/mt5-ai-trading-runtime
 
 MAIN HEAD:
 <actual SHA>
@@ -1640,7 +1640,7 @@ GITHUB MAIN:
 <SHA>
 
 GITHUB URL:
-https://github.com/Tariq990/GPTTRADDER
+https://github.com/Tariq990/mt5-ai-trading-runtime
 
 CI:
 PASS / FAIL
