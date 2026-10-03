@@ -282,3 +282,11 @@ Do not commit:
 - logs or generated runtime artifacts.
 
 See `.env.example`, `AGENTS.md`, and `REPOSITORY.md` for the detailed operational contract and engineering history.
+
+## License
+
+This repository is **source-available for personal, non-commercial use only** under the [Personal Non-Commercial Software License 1.0](LICENSE).
+
+You may inspect, clone, run, and privately modify the project for your own personal non-commercial use. Commercial use, client work, paid services, resale, SaaS/hosting, redistribution, sublicensing, or inclusion in a commercial product requires prior written permission from the copyright holder.
+
+This is not an OSI-approved open-source license.
